@@ -154,3 +154,7 @@ Why not the alternatives (analysis 2026-11-16, 2015-2025):
    => Tuning fixes the top-end calibration of the rare-event trees (the gust-60 under-forecast is gone)
    but adds little Brier skill; at these event counts the trees and the add-on are close. AUC ~0.96-0.98
    for all three.
+   Figures 2026-11-17: `scripts/plot_gbt_compare.py` -> `images/models/gbt_compare/` (overview of all
+   three model families by threshold; tuned-GBT reliability pooled and per gradient set).
+   Decision 2026-11-17: the user is satisfied with these results (the high-end winds are the
+   high-impact ones) and takes the tuned GBT as the chosen model family.
