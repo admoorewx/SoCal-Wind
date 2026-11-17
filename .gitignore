@@ -1,0 +1,18 @@
+# Data and outputs (too large / regenerable)
+data/
+images/
+models/
+*.parquet
+*.joblib
+*.log
+
+# Credentials: Synoptic API token is read from this file at runtime
+scripts/synoptic_api.txt.txt
+*.token
+.env
+
+# Scratch / caches
+scripts/temp.txt
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

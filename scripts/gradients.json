@@ -1,0 +1,82 @@
+{
+    "LAX-TPH": {
+        "station1": "KLAX",
+        "station2": "KTPH"
+    },
+    "LAX-DAG": {
+        "station1": "KLAX",
+        "station2": "KDAG"
+    }, 
+    "LAX-WJF": {
+        "station1": "KLAX",
+        "station2": "KWJF"
+    },  
+    "LAX-PMD": {
+        "station1": "KLAX",
+        "station2": "KPMD"
+    }, 
+    "LAX-BFL": {
+        "station1": "KLAX",
+        "station2": "KBFL"
+    }, 
+    "SBA-BFL": {
+        "station1": "KSBA",
+        "station2": "KBFL"
+    }, 
+    "SAN-IPL": {
+        "station1": "KSAN",
+        "station2": "KIPL"
+    }, 
+    "SAN-LAS": {
+        "station1": "KSAN",
+        "station2": "KLAS"
+    }, 
+    "NID-RNO": {
+        "station1": "KNID",
+        "station2": "KRNO"
+    }, 
+    "SBA-SMX": {
+        "station1": "KSBA",
+        "station2": "KSMX"
+    }, 
+    "SFO-WMC": {
+        "station1": "KSFO",
+        "station2": "KWMC"
+    }, 
+    "RDD-SAC": {
+        "station1": "KRDD",
+        "station2": "KSAC"
+    }, 
+    "SFO-ACV": {
+        "station1": "KSFO",
+        "station2": "KACV"
+    }, 
+    "OTH-ACV": {
+        "station1": "KOTH",
+        "station2": "KACV"
+    }, 
+    "MFR-RDD": {
+        "station1": "KMFR",
+        "station2": "KRDD"
+    }, 
+    "MFR-LMT": {
+        "station1": "KMFR",
+        "station2": "KLMT"
+    }, 
+    "SAC-MFR": {
+        "station1": "KSAC",
+        "station2": "KMFR"
+    },  
+    "SAC-RBL": {
+        "station1": "KSAC",
+        "station2": "KRBL"
+    }, 
+    "SAC-RNO": {
+        "station1": "KSAC",
+        "station2": "KRNO"
+    }, 
+    "SFO-SAC": {
+        "station1": "KSFO",
+        "station2": "KSAC"
+    } 
+}

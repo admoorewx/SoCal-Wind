@@ -1,0 +1,41 @@
+Dataset counts for the pressure-gradient / wind analysis
+==========================================================
+Recorded: 2026-11-13 (updated after the portable-station exclusion re-run)
+Source: gradient_pipeline.py outputs from the 2026-11-13 run (data/v2/derived/gradients/,
+log run_portable_2026-11-13.log). WWG networks, portable stations and wind-QC-excluded stations
+are removed (see match_qc.json).
+
+STATIONS
+--------
+  2,848   stations with data in obs_raw
+   -186   WWG networks (WWG-SONOMA, WWG-LLWC, WWG-MISC)
+   -166   portable stations with data (237 portable IDs in stations.parquet; see
+          gradient_pipeline.portable_stations: "PORTABLE" in name, or a RAWS "PORT" token)
+     -9   wind-QC exclusions (BEUO, CLE, CPPW, CSPW, DDBUF, DDRIO, KEE, MDTCA, OWY)
+  2,531   stations analyzed (after exclusions)
+  2,506   stations with a correlation (n >= 2) in correlations.parquet
+    412   stations retained (n >= MIN_N and rho >= MIN_RHO) for at least one signed gradient
+
+  Note: stations.parquet lists 4,907 stations; not all have observations.
+  KWSIX is masked from 2025-12-01 onward (manual exclusion), not dropped entirely.
+
+OBSERVATIONS
+------------
+  542,874,209   observation rows in obs_raw (all stations)
+  528,953,067   observation rows after exclusions (all rows, including rows with no wind value)
+1,400,433,661   matched rows in derived/gradients/matched/ (one per station per gradient time,
+                summed over the 9 station1 time grids)
+
+PRESSURE GRADIENTS
+------------------
+         20   gradient pairs defined in scripts/gradients.json
+         40   signed gradients (each pair split into + and -)
+          9   station1 time grids: KLAX, KMFR, KNID, KOTH, KRDD, KSAC, KSAN, KSBA, KSFO
+  2,114,748   hourly gradient values (rows in gradient_timeseries.parquet, all 20 pairs)
+
+PREVIOUS VALUES (2026-11-12 run, before portable stations were excluded)
+------------------------------------------------------------------------
+  2,697 stations analyzed; 2,672 with a correlation; 429 retained
+  532,688,207 observation rows after exclusions; 1,432,250,825 matched rows
+
+These numbers will change if the exclusions, QC rules or gradients.json change and the pipeline is re-run.
