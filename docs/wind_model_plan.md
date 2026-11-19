@@ -158,3 +158,70 @@ Why not the alternatives (analysis 2026-11-16, 2015-2025):
    three model families by threshold; tuned-GBT reliability pooled and per gradient set).
    Decision 2026-11-17: the user is satisfied with these results (the high-end winds are the
    high-impact ones) and takes the tuned GBT as the chosen model family.
+6. Speed (point-forecast) models - tuning DONE 2026-11-18; next step awaiting the user's choice. Targets
+   unchanged (sustained = set P75, gust = nearest-rank P90 with 2-station floor; identical to the
+   event-model values). Out-of-fold RMSE (2015-2025, leave-one-year-out, identical hours), linear add-on /
+   GBT / tuned GBT: sustained 3.29 / 2.77 / 2.76 mph, gust 6.08 / 5.11 / 5.09 mph.
+   - `scripts/fit_gbt_tuned.py --speed` tunes the GBT speed regressors (inner year-group CV over
+     num_leaves {7,15,31,63} x min_data_in_leaf {20,50,100}) -> `derived/models/gbt_tuned_speed/`.
+     Full run: 56 models, ~3 h 7 min at 14 workers (the earlier ~50 min estimate was wrong). Mostly picks
+     31-63 leaves. Gain vs fixed GBT is noise: per set mean -0.016 mph RMSE (range -0.09 to +0.07).
+     Not overfitting (held-out-year scores are not worse), but tree shape is not the limit.
+   - All models under-predict strong winds; tuning does not change this. Bias by observed bin
+     (linear / GBT / tuned): gust >= 70 mph -22.1 / -20.0 / -19.7, gust 55-60 -10.1 / -8.1 / -8.0,
+     sustained >= 40 mph -13.3 / -11.2 / -10.9. This is the squared-error loss shrinking rare extremes.
+   - `scripts/plot_speed_compare.py` (run 2026-11-18): RMSE, bias and hours by 5 mph bin, binned by
+     observed and by forecast speed -> `images/models/speed_compare/rmse_by_speed_{pooled,sustained,gust}.png`,
+     numbers -> `derived/models/speed_compare/error_by_bin.csv`. Known cosmetic issue: x tick labels
+     overlap in the gust panels of the pooled figure (15 bins); rotate if the figures are kept.
+   - Recommendation (not yet confirmed by the user): keep the fixed-shape GBT (gbt_all) as the speed model,
+     drop the speed tuning, and address strong-wind under-prediction next.
+   - Options for the next step (user to decide): quantile mapping to fix strong-wind under-prediction;
+     10th/50th/90th percentile range forecasts (linear quantile regression + LightGBM quantile); an improved
+     linear model with a curve on |gradient|; scoring for strong-wind hours.
+   - Strong-wind under-prediction investigation (2026-11-19): `scripts/plot_error_boxes.py` -> box plots of
+     GBT (gbt_all) error by observed speed, |gradient| and observed wind direction (16 sectors), pooled ->
+     `images/models/error_boxes/error_boxes_pooled.png`, stats -> `derived/models/error_boxes/error_box_stats.csv`.
+     Finding: error grows strongly with OBSERVED speed but is flat (mean ~0) across |gradient| bins and
+     wind-direction sectors; only the >= 12 hPa bin dips slightly (gust mean -0.6 mph). Under-prediction is
+     conditional on the outcome (hours windier than their gradient implies), not a bias at strong gradients.
+   - Strong-hour misses (2026-11-19): `scripts/plot_strong_misses.py` -> `images/models/strong_misses/`,
+     tables `derived/models/strong_misses/` (strong_hours.parquet, by_set.csv, bss_by_bin.csv). Strong =
+     sustained > 40 / gust > 50 mph observed; miss = |GBT error| > 5 mph.
+     Sustained: only 288 strong h, 91% missed (all under), mean error -11.2 mph; too few to break down.
+     Gust: 21,659 strong h, 63% missed (13,402 under, 324 over). Miss share falls steadily with |gradient|
+     (~85-95% below 4 hPa, mean error -12.8; ~35-45% at >= 13 hPa, mean error -4.9 at >= 10). No hour-of-day
+     signal. Jul-Sep ~90% missed but few hours. Worst sets: SFO-WMC+/-, SFO-SAC+, SAC-RBL+, SAC-RNO+/-
+     (-12 to -15 mph); best SFO-ACV+, SAC-MFR+, MFR-RDD- (about -4).
+     Event-model BSS by |gradient| is lowest at 2-5 hPa and rises with gradient; BSS by observed speed shows
+     mean probabilities that rise too slowly past the threshold (gust 60: ~0.25 at 70 mph).
+   - SFO-WMC+ station check (2026-11-19): `scripts/plot_sfo_wmc_stations.py` -> `images/case_studies/sfo_wmc/`
+     (station_timeseries_full, station_timeseries_events, station_map). The gust set is effectively a West
+     Reno / Verdi cluster (6 of 10 stations within ~10 km, 1,490-1,650 m) plus Tahoe-area peaks; it sits
+     ~300 km from SFO and ~200 km from WMC. NV052 (South Verdi, from 2022-07) and NV013 (NW Reno) are the
+     windiest (p99 57 / 53 mph vs 34-46) but track their neighbours (hourly r 0.74-0.86 with NV052) and in
+     the 6 worst events most stations peak together: the misses are real, widespread Reno-area wind events,
+     not errant stations. Several have SFO-WMC near 0 hPa. DNMOG reports exact-zero gusts ~4x as often as
+     its neighbours (3.6% vs 0.9%). Next: ERA5 maps for the worst events (paused for this check).
+   - ERA5 case maps (2026-11-19): `scripts/era5_fetch_events.py` (CDS; day files era5_sfc_/era5_ua_YYYYMMDD.nc in
+     /mnt/d/ERA5, 30-50N 135-110W, sfc T2m/MSLP/10 m wind/gust, 850/700/500 z/T/u/v) and
+     `scripts/plot_era5_event_maps.py` -> `images/case_studies/sfo_wmc/era5/` (6 events at -12/-6/0 h + composite).
+     Common pattern: at every peak the 700 hPa flow over Reno is SW (205-252 deg) at 32-65 kt (mean ~233/50 kt),
+     usually strengthening through the 12 h before, with 500 hPa 44-100 kt; trough/jet to the north-west. Consistent
+     with Sierra downslope / mountain-wave wind, which the sea-level SFO-WMC gradient does not measure.
+     Caveat: 6 events, no comparison group yet (how often is 700 hPa SW >= 40 kt without strong gusts?).
+   - SAN-IPL station check (2026-11-19): `scripts/plot_set_stations.py <signed gradient>` (general version of the
+     SFO-WMC check; any set size) -> `images/case_studies/san_ipl_{pos,neg}/`, tables
+     `derived/models/case_studies/san_ipl_{pos,neg}_stations.csv`. "Setters" = stations ranked 1..k in an hour.
+     SAN-IPL+ (34 stations) spans SoCal to the Bay Area and one WA site (PS004, 1,623 km): rho >= 0.5 lets in
+     chance correlations. With ~19 reporting, k = 2, so the target is the 2nd-highest gust in the whole set.
+     Setters in misses: WWAC1 Whitewater 80%, JWBC1 Jawbone (327 km) 50%, TNSC1 Mountain Springs 36%, LPDC1
+     Lake Palmdale (252 km) 15%, AATC1 Altamont (723 km) 6%. The 2 worst misses (2023-01-08, 2024-02-05) were
+     set by Altamont + Jepson Prairie (NorCal storms). One (2023-07-31) is a sudden summer spike (likely
+     convective outflow).
+     Ruled out as general explanations: (1) distant setters: a setter > 200 km in 68% of missed vs 73% of
+     well-forecast strong hours, so not specific to misses; (2) network change: core setters report 2015-2026
+     and misses spread over all years (bias drifts -4 to -8.5 mph, noisy). SAN-IPL- (16 stations, qualifies from
+     2020): setters are LA/Ventura/Inland Empire Santa Ana sites (Wiley Ridge 54%, Highland Springs 51%, Chino
+     Hills 33%); HRICH (WA, 105 h) never sets.
+     Design issue to revisit: station-set selection needs a distance / region constraint (and a minimum n).

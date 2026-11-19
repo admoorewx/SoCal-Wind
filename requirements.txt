@@ -8,3 +8,6 @@ shapely>=2.2
 pyproj>=3.8
 geopandas>=1.2
 cartopy>=0.26
+xarray>=2026.9
+netCDF4>=1.7
+cdsapi>=0.7.7
