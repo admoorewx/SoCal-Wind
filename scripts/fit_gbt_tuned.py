@@ -20,8 +20,12 @@ Reads (never writes) derived/models/gbt/ and gradient_addon/.
 -> derived/models/gbt_tuned/choices.csv                       shape + rounds chosen per fold
 -> derived/models/gbt_tuned/oof_predictions.parquet, models/
 
+With --speed: only the speed (linear-target, L2) models, grid GRID_SPEED (num_leaves 7-63), written
+to derived/models/gbt_tuned_speed/ so the tuned event models in gbt_tuned/ are left untouched.
+
 Usage:
   python fit_gbt_tuned.py [--workers 14] [--all] [--only LAX-WJF-]
+  python fit_gbt_tuned.py --speed
 """
 import argparse
 import itertools
@@ -39,12 +43,15 @@ import gradient_pipeline as gp
 
 OUT = os.path.join(fg.MDIR, "gbt_tuned")
 GBT = os.path.join(fg.MDIR, "gbt")
+OUT_SPEED = os.path.join(fg.MDIR, "gbt_tuned_speed")
 GRID = list(itertools.product([4, 7, 15], [20, 50, 100]))  # (num_leaves, min_data_in_leaf)
+# speed (regression) models: continuous target, larger trees allowed
+GRID_SPEED = list(itertools.product([7, 15, 31, 63], [20, 50, 100]))
 RARE = {("gust", 50), ("gust", 60), ("sustained", 30)}
 N_INNER = 3
 
 
-def tune(X, y, years, tr_years, kind, cols):
+def tune(X, y, years, tr_years, kind, cols, grid):
     """Inner year-group CV over GRID on the given training years; returns (leaves, min_leaf, rounds, score)."""
     tr_years = sorted(tr_years)
     tr_idx = np.flatnonzero(np.isin(years, tr_years))
@@ -54,7 +61,7 @@ def tune(X, y, years, tr_years, kind, cols):
     folds = [(np.flatnonzero(g != k), np.flatnonzero(g == k)) for k in range(N_INNER)]
     ds = lgb.Dataset(X[tr_idx], y[tr_idx], feature_name=cols, free_raw_data=False)
     best = None
-    for leaves, mleaf in GRID:
+    for leaves, mleaf in grid:
         p = fg.params(kind, cols)
         p.update(num_leaves=leaves, min_data_in_leaf=mleaf)
         r = lgb.cv(p, ds, fg.MAX_ROUNDS, folds=folds, stratified=False,
@@ -73,7 +80,7 @@ def fit(X, y, idx, kind, cols, leaves, mleaf, n):
 
 
 def run(job):
-    sg, var, kind, T, d, cands = job
+    sg, var, kind, T, d, cands, out, grid = job
     cols = fg.BASE + cands
     X = d[cols].to_numpy(float)
     y = (d[f"ev_{T}"] if kind == "logistic" else d.target_mph).to_numpy(float)
@@ -85,14 +92,14 @@ def run(job):
     for yr in uy:
         te = years == yr
         tr_years = [t for t in uy if t != yr]
-        leaves, mleaf, n, sc = tune(X, y, years, tr_years, kind, cols)
+        leaves, mleaf, n, sc = tune(X, y, years, tr_years, kind, cols, grid)
         pred[te] = fit(X, y, ~te, kind, cols, leaves, mleaf, n).predict(X[te])
         ch.append({**key, "fold": str(yr), "num_leaves": leaves, "min_data_in_leaf": mleaf,
                    "rounds": n, "inner_score": sc})
-    leaves, mleaf, n, sc = tune(X, y, years, list(uy), kind, cols)
+    leaves, mleaf, n, sc = tune(X, y, years, list(uy), kind, cols, grid)
     m = fit(X, y, np.ones(len(y), bool), kind, cols, leaves, mleaf, n)
-    os.makedirs(os.path.join(OUT, "models"), exist_ok=True)
-    m.save_model(os.path.join(OUT, "models", f"{sg}_{var}_{kind}_{T}__gbt_tuned.txt"))
+    os.makedirs(os.path.join(out, "models"), exist_ok=True)
+    m.save_model(os.path.join(out, "models", f"{sg}_{var}_{kind}_{T}__gbt_tuned.txt"))
     ch.append({**key, "fold": "final", "num_leaves": leaves, "min_data_in_leaf": mleaf,
                "rounds": n, "inner_score": sc})
     oof = pd.DataFrame({**key, "time_utc": d.time_utc.to_numpy(), "obs": y.astype("float32"),
@@ -126,7 +133,10 @@ def main():
     ap.add_argument("--workers", type=int, default=14)
     ap.add_argument("--all", action="store_true", help="tune every model, not only rare thresholds")
     ap.add_argument("--only", help="one signed gradient (test)")
+    ap.add_argument("--speed", action="store_true",
+                    help="tune only the speed (linear-target) models, larger-tree grid, -> gbt_tuned_speed/")
     args = ap.parse_args()
+    out, grid = (OUT_SPEED, GRID_SPEED) if args.speed else (OUT, GRID)
     pairs = list(gp.load_pairs(gp.DEFAULT_GRADIENTS))
     ts = pd.read_parquet(os.path.join(fg.DER, "gradients", "gradient_timeseries.parquet"),
                          columns=["gradient", "time_utc", "gradient_hpa"])
@@ -148,9 +158,12 @@ def main():
             cands = [f"g_{p}" for p in pairs if p != sg[:-1]]
             mod = counts[(counts.signed_gradient == sg) & (counts.variable == var) & counts.modelled]
             for kind, t in [("linear", 0)] + [("logistic", int(t)) for t in mod.threshold_mph]:
-                if args.all or (var, t) in RARE:
-                    jobs.append((sg, var, kind, t, d, cands))
-    print(f"{len(jobs)} models, grid {GRID}", flush=True)
+                if args.speed:
+                    if kind == "linear":
+                        jobs.append((sg, var, kind, t, d, cands, out, grid))
+                elif args.all or (var, t) in RARE:
+                    jobs.append((sg, var, kind, t, d, cands, out, grid))
+    print(f"{len(jobs)} models, grid {grid} -> {out}", flush=True)
     chs, oofs = [], []
     with Pool(args.workers) as pool:
         for i, (k, ch, o) in enumerate(pool.imap_unordered(run, jobs), 1):
@@ -168,23 +181,24 @@ def main():
     bad, mism = (m._merge != "both").sum(), (m.obs != m.obs_ref).sum()
     assert bad == 0 and mism == 0, f"row mismatch with gbt run: {bad} unmatched, {mism} obs differ"
     oof = m.drop(columns=["_merge", "obs_ref"])
-    os.makedirs(OUT, exist_ok=True)
-    oof.to_parquet(os.path.join(OUT, "oof_predictions.parquet"), index=False)
-    pd.DataFrame(chs).to_csv(os.path.join(OUT, "choices.csv"), index=False)
+    os.makedirs(out, exist_ok=True)
+    oof.to_parquet(os.path.join(out, "oof_predictions.parquet"), index=False)
+    pd.DataFrame(chs).to_csv(os.path.join(out, "choices.csv"), index=False)
     labs = ("addon", "gbt_all", "gbt_tuned")
     met = pd.DataFrame([{**dict(zip(keys[:4], k)), "n_hours": len(g), **metrics(g, k[2], labs)}
                         for k, g in oof.groupby(keys[:4], sort=True)])
     met[met.kind == "logistic"].dropna(axis=1, how="all").round(4).to_csv(
-        os.path.join(OUT, "cv_logistic.csv"), index=False)
+        os.path.join(out, "cv_logistic.csv"), index=False)
     met[met.kind == "linear"].dropna(axis=1, how="all").round(4).to_csv(
-        os.path.join(OUT, "cv_linear.csv"), index=False)
-    with open(os.path.join(OUT, "gbt_tuned_meta.json"), "w") as f:
-        json.dump({"lightgbm": lgb.__version__, "base_params": fg.PARAMS, "grid_leaves_minleaf": GRID,
+        os.path.join(out, "cv_linear.csv"), index=False)
+    with open(os.path.join(out, "gbt_tuned_meta.json"), "w") as f:
+        json.dump({"lightgbm": lgb.__version__, "base_params": fg.PARAMS, "grid_leaves_minleaf": grid,
                    "inner_cv": f"{N_INNER} interleaved year groups of the training years",
                    "selection": "best mean inner logloss (l2 linear), early stopping",
-                   "scope": "all" if args.all else sorted(map(list, RARE)), "only": args.only,
+                   "scope": "speed" if args.speed else ("all" if args.all else sorted(map(list, RARE))),
+                   "only": args.only,
                    "created_utc": pd.Timestamp.now(tz="UTC").isoformat()}, f, indent=2)
-    print(f"Wrote {OUT}")
+    print(f"Wrote {out}")
 
 
 if __name__ == "__main__":

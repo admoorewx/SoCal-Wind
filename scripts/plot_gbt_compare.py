@@ -8,8 +8,10 @@ Models (all out of fold, leave-one-year-out 2015-2025, identical hours):
              run for the rare thresholds only (gust 50/60, sustained 30)
 
 -> images/models/gbt_compare/overview_compare.png        BSS, top-end ratio and linear R2 by threshold
--> images/models/gbt_compare/tuned_calibration_pooled.png reliability pooled over all gradient sets
--> images/models/gbt_compare/tuned_calibration_<variable>_<T>.png  reliability per gradient set
+-> images/models/gbt_compare/calibration_pooled_<variable>.png  reliability pooled over gradient sets,
+   every threshold (add-on, GBT, and tuned GBT where it was run)
+-> images/models/gbt_compare/calibration_<variable>_<T>.png      reliability per gradient set, add-on vs
+   the best tree model (tuned GBT where run, else GBT)
 
 Usage:
   python plot_gbt_compare.py
@@ -19,6 +21,7 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
@@ -146,7 +149,7 @@ def rel_panel(ax, o, keys, lw_main=2.4, min_bin=MIN_BIN, lim=1.0):
     y = o.obs.to_numpy(float)
     for k in keys:
         r = reliability(o[f"pred_{k}"].to_numpy(float), y, min_bin)
-        main = k == "gbt_tuned"
+        main = k == keys[-1]  # last key = emphasised model
         ax.plot(r[:, 0], r[:, 1], color=COLOR[k], lw=lw_main if main else 1.4, marker="o",
                 ms=5 if main else 3.5, mec=SURFACE, alpha=1 if main else 0.85, zorder=5 if main else 4)
     ax.set_xlim(0, lim)
@@ -154,81 +157,105 @@ def rel_panel(ax, o, keys, lw_main=2.4, min_bin=MIN_BIN, lim=1.0):
     ax.set_aspect("equal")
 
 
-def pooled(Ot):
-    fig, axes = plt.subplots(2, 3, figsize=(15, 7.4), facecolor=SURFACE, sharex="col",
-                             gridspec_kw={"height_ratios": [3, 1]})
-    keys = ["addon", "gbt_all", "gbt_tuned"]
-    for j, (v, t) in enumerate(RARE):
-        o = Ot[(Ot.variable == v) & (Ot.threshold_mph == t)]
-        ax = axes[0, j]
-        rel_panel(ax, o, keys)
-        ax.set_title(f"{row_label(v, t)}  ·  {o.signed_gradient.nunique()} gradient sets, "
-                     f"{int(o.obs.sum()):,} event h", loc="left", fontsize=10.5, color=INK)
-        if j == 0:
-            ax.set_ylabel("Observed frequency")
+def tree_key(o):
+    """Best available tree model for these rows: tuned GBT where it was run, else GBT."""
+    return "gbt_tuned" if o.pred_gbt_tuned.notna().all() else "gbt_all"
+
+
+def pooled(O):
+    """Reliability pooled over gradient sets: one figure per variable, one column per threshold."""
+    for var in ("sustained", "gust"):
+        rows = [(v, t) for v, t in ROWS if v == var]
+        n = len(rows)
+        fig, axes = plt.subplots(2, n, figsize=(5 * n, 7.4), facecolor=SURFACE, sharex="col",
+                                 gridspec_kw={"height_ratios": [3, 1], "hspace": 0.12}, squeeze=False)
+        for j, (v, t) in enumerate(rows):
+            o = O[(O.variable == v) & (O.threshold_mph == t)]
+            best = tree_key(o)
+            keys = ["addon", "gbt_all"] + (["gbt_tuned"] if best == "gbt_tuned" else [])
+            ax = axes[0, j]
+            rel_panel(ax, o, keys)
+            ax.set_title(f"{row_label(v, t)}\n{o.signed_gradient.nunique()} gradient sets, "
+                         f"{int(o.obs.sum()):,} event h", loc="left", fontsize=10.5, color=INK)
             legend(ax, keys, loc="upper left")
-        # forecast counts (log) for the tuned model
-        hx = axes[1, j]
-        style(hx)
-        cnt, _ = np.histogram(o.pred_gbt_tuned, bins=np.linspace(0, 1, 41))
-        hx.bar(np.linspace(0.0125, 0.9875, 40), np.maximum(cnt, 0.8), width=0.021, color=COLOR["gbt_tuned"],
-               edgecolor=SURFACE, linewidth=0.5, zorder=3)
-        hx.set_yscale("log")
-        hx.set_xlabel("Forecast probability")
-        if j == 0:
-            hx.set_ylabel("Hours (tuned GBT)")
-    fig.suptitle("Tuned GBT calibration, pooled over all gradient sets", x=0.01, ha="left", fontsize=14,
-                 color=INK)
-    fig.text(0.01, 0.935, f"Out-of-fold reliability (bins with ≥{MIN_BIN} h); dashed = perfect calibration. "
-             "Pooling weights large gradient sets more; per-set panels are in tuned_calibration_*.png.",
-             fontsize=9.5, color=INK2)
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
-    fig.savefig(os.path.join(OUT, "tuned_calibration_pooled.png"), dpi=140, facecolor=SURFACE)
-    plt.close(fig)
+            if j == 0:
+                ax.set_ylabel("Observed frequency")
+            hx = axes[1, j]
+            style(hx)
+            cnt, _ = np.histogram(o[f"pred_{best}"], bins=np.linspace(0, 1, 41))
+            hx.bar(np.linspace(0.0125, 0.9875, 40), np.maximum(cnt, 0.8), width=0.021, color=COLOR[best],
+                   edgecolor=SURFACE, linewidth=0.5, zorder=3)
+            hx.set_yscale("log")
+            hx.set_ylim(top=cnt.max() * 4)
+            hx.yaxis.set_major_locator(matplotlib.ticker.LogLocator(base=10, numticks=4))
+            hx.set_xlabel("Forecast probability")
+            hx.set_ylabel(f"Hours ({LABEL[best]})", fontsize=8)
+        fig.suptitle(f"{var.capitalize()} event calibration, pooled over all gradient sets", x=0.01,
+                     ha="left", fontsize=14, color=INK)
+        fig.text(0.01, 0.935, f"Out-of-fold reliability (bins with ≥{MIN_BIN} h); dashed = perfect "
+                 "calibration. Pooling weights large gradient sets more. Tuned GBT was run for the rare "
+                 "thresholds only.", fontsize=9.5, color=INK2)
+        fig.tight_layout(rect=(0, 0, 1, 0.93))
+        fig.savefig(os.path.join(OUT, f"calibration_pooled_{var}.png"), dpi=140, facecolor=SURFACE)
+        plt.close(fig)
 
 
-def per_set(Ot, Lt):
-    for v, t in RARE:
-        o = Ot[(Ot.variable == v) & (Ot.threshold_mph == t)]
+def per_set(O, M):
+    """Add-on vs the best tree model (tuned GBT where run, else GBT), one panel per gradient set."""
+    for v, t in ROWS:
+        o = O[(O.variable == v) & (O.threshold_mph == t)]
+        best = tree_key(o)
+        keys = ["addon", best]
         sgs = sorted(o.signed_gradient.unique())
         nc = 6
         nr = int(np.ceil(len(sgs) / nc))
         fig, axes = plt.subplots(nr, nc, figsize=(2.6 * nc, 2.75 * nr + 0.9), facecolor=SURFACE,
                                  squeeze=False)
         for ax, sg in zip(axes.flat, sgs):
-            g = o[o.signed_gradient == sg]
-            rel_panel(ax, g, ["addon", "gbt_tuned"], lw_main=2.0, min_bin=30)
-            r = Lt[(Lt.signed_gradient == sg) & (Lt.variable == v) & (Lt.threshold_mph == t)].iloc[0]
+            rel_panel(ax, o[o.signed_gradient == sg], keys, lw_main=2.0, min_bin=30)
+            r = M[(M.signed_gradient == sg) & (M.variable == v) & (M.threshold_mph == t)].iloc[0]
             ax.set_title(sg, loc="left", fontsize=9.5, color=INK)
             ax.text(0.04, 0.96, f"{int(r.event_hours)} event h\ntop ratio {r.top_ratio_addon:.2f} → "
-                    f"{r.top_ratio_gbt_tuned:.2f}\nBSS {r.bss_addon:.2f} → {r.bss_gbt_tuned:.2f}",
+                    f"{r[f'top_ratio_{best}']:.2f}\nBSS {r.bss_addon:.2f} → {r[f'bss_{best}']:.2f}",
                     transform=ax.transAxes, va="top", fontsize=7, color=INK, path_effects=HALO)
             ax.tick_params(labelsize=7)
-        for ax in list(axes.flat)[len(sgs):]:
+        spare = list(axes.flat)[len(sgs):]
+        for ax in spare:
             ax.axis("off")
-        legend(axes.flat[len(sgs) - 1] if len(sgs) % nc == 0 else list(axes.flat)[len(sgs)],
-               ["addon", "gbt_tuned"], loc="center")
-        fig.suptitle(f"{row_label(v, t)}: tuned GBT vs add-on calibration by gradient set", x=0.01, ha="left",
-                     fontsize=13, color=INK)
-        fig.text(0.01, 1 - 0.55 / fig.get_figheight(),
+        if spare:
+            legend(spare[0], keys, loc="center")
+        else:
+            legend(axes.flat[-1], keys, loc="lower right")
+        fh = fig.get_figheight()
+        fig.suptitle(f"{row_label(v, t)}: {LABEL[best]} vs add-on calibration by gradient set", x=0.01,
+                     y=1 - 0.18 / fh, ha="left", va="top", fontsize=13, color=INK)
+        fig.text(0.01, 1 - 0.62 / fh,
                  "x = forecast probability, y = observed frequency (bins with ≥30 h), out of fold. "
-                 "Numbers: add-on → tuned GBT.", fontsize=9, color=INK2)
-        fig.tight_layout(rect=(0, 0, 1, 1 - 0.75 / fig.get_figheight()))
-        fig.savefig(os.path.join(OUT, f"tuned_calibration_{v}_{t}.png"), dpi=120, facecolor=SURFACE)
+                 f"Numbers: add-on → {LABEL[best]}.", fontsize=9, color=INK2)
+        fig.tight_layout(rect=(0, 0, 1, 1 - 0.85 / fh))
+        fig.savefig(os.path.join(OUT, f"calibration_{v}_{t}.png"), dpi=120, facecolor=SURFACE)
         plt.close(fig)
+        print(f"Wrote calibration_{v}_{t}.png ({LABEL[best]})", flush=True)
 
 
 def main():
     plt.rcParams.update({"font.family": "DejaVu Sans", "axes.edgecolor": GRID, "text.color": INK,
                          "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2})
     os.makedirs(OUT, exist_ok=True)
+    keys = ["signed_gradient", "variable", "kind", "threshold_mph"]
     L = pd.read_csv(os.path.join(MDIR, "gbt", "cv_logistic.csv"))
     R = pd.read_csv(os.path.join(MDIR, "gbt", "cv_linear.csv"))
     Lt = pd.read_csv(os.path.join(MDIR, "gbt_tuned", "cv_logistic.csv"))
-    Ot = pd.read_parquet(os.path.join(MDIR, "gbt_tuned", "oof_predictions.parquet"))
+    M = L.merge(Lt[keys + ["bss_gbt_tuned", "top_ratio_gbt_tuned"]], on=keys, how="left")
+    O = pd.read_parquet(os.path.join(MDIR, "gbt", "oof_predictions.parquet"),
+                        columns=keys + ["time_utc", "obs", "pred_addon", "pred_gbt_all"],
+                        filters=[("kind", "==", "logistic")])
+    Ot = pd.read_parquet(os.path.join(MDIR, "gbt_tuned", "oof_predictions.parquet"),
+                         columns=keys + ["time_utc", "pred_gbt_tuned"], filters=[("kind", "==", "logistic")])
+    O = O.merge(Ot, on=keys + ["time_utc"], how="left")
     overview(L, Lt, R)
-    pooled(Ot)
-    per_set(Ot, Lt)
+    pooled(O)
+    per_set(O, M)
     print(f"Wrote figures to {OUT}")
 
 
