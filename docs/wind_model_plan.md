@@ -174,8 +174,8 @@ Why not the alternatives (analysis 2026-11-16, 2015-2025):
      observed and by forecast speed -> `images/models/speed_compare/rmse_by_speed_{pooled,sustained,gust}.png`,
      numbers -> `derived/models/speed_compare/error_by_bin.csv`. Known cosmetic issue: x tick labels
      overlap in the gust panels of the pooled figure (15 bins); rotate if the figures are kept.
-   - Recommendation (not yet confirmed by the user): keep the fixed-shape GBT (gbt_all) as the speed model,
-     drop the speed tuning, and address strong-wind under-prediction next.
+   - DECIDED 2026-11-21 (user): the fixed-shape GBT (gbt_all) is the speed model; speed tuning dropped.
+     Strong-wind under-prediction is addressed next.
    - Options for the next step (user to decide): quantile mapping to fix strong-wind under-prediction;
      10th/50th/90th percentile range forecasts (linear quantile regression + LightGBM quantile); an improved
      linear model with a curve on |gradient|; scoring for strong-wind hours.
@@ -224,4 +224,49 @@ Why not the alternatives (analysis 2026-11-16, 2015-2025):
      and misses spread over all years (bias drifts -4 to -8.5 mph, noisy). SAN-IPL- (16 stations, qualifies from
      2020): setters are LA/Ventura/Inland Empire Santa Ana sites (Wiley Ridge 54%, Highland Springs 51%, Chino
      Hills 33%); HRICH (WA, 105 h) never sets.
-     Design issue to revisit: station-set selection needs a distance / region constraint (and a minimum n).
+     Design issue to revisit: station-set selection needs a distance / region constraint (and a minimum n). DEFERRED 2026-11-21: the user wants
+     to think about the approach; until then, displaced stations are ignored case by case.
+   - Speed model DECIDED 2026-11-21: fixed-shape GBT (gbt_all); see step 6.
+   - Reno 700 hPa series (2026-11-21): `scripts/era5_fetch_reno700.py` -> /mnt/d/ERA5/reno700/era5_ua700_YYYYMM.nc
+     (hourly u/v 700 hPa, 3x3 0.25 deg box centred 39.50N 120.00W, 2015-2025, one CDS request per month).
+   - Reno 700 hPa vs SFO-WMC+ gust error (2026-11-21): `scripts/plot_reno700_relationship.py` ->
+     `images/case_studies/sfo_wmc/reno700/reno700_vs_error.png`, numbers -> `derived/models/case_studies/
+     sfo_wmc_reno700_{bins,grad_x_w700}.csv`. 21,556 gust hours. Target > 50 mph in 0% of hours below 20 kt aloft,
+     3.5% at 30-40, 10% at 40-50, 31% at 50-60, 51% at >= 60 kt; GBT forecasts > 50 mph in 0 / 0 / 1.7 / 10 / 14%.
+     79% of strong hours and 78% of missed strong hours have >= 40 kt (vs 10% of all hours); nearly all are SW.
+     Error grows with 700 hPa speed in every |gradient| bin (0-4 hPa: about -7.5 mph at 50-60 kt); corr(error,
+     w700) = -0.28. SW >= 40 kt alone is not enough (only 20% of those hours exceed 50 mph).
+     CONCLUSION / CLOSED (user, 2026-11-21): SFO-WMC+ gust misses are explained by Sierra downslope / mountain-wave
+     wind driven by strong SW flow aloft, which the sea-level gradient does not measure. Informational only:
+     700 hPa wind is NOT added to the model (needs NWP input; the model stays gradient-only).
+   - SAN-IPL+ regimes (2026-11-21). Strong-hour breakdown (exploratory, not a saved script): 2,101 under-forecast
+     strong-gust hours in 339 episodes (gap > 24 h), 58% of 3,626 strong hours. Miss share is high for every
+     setter area (top station: San Gorgonio 55%, Mojave/Jawbone 56%, San Diego mtns 69%, Antelope Valley 73%) and
+     season (MAM 53% .. DJF 66%); it depends mainly on gradient (91% < 3 hPa, 75% 3-6, 54% 6-9, 41% >= 9).
+     Forecasts are compressed vs obs at every gradient (3-6 hPa: obs > 50 mph 3.0% of hours, forecast 0.9%).
+     So the misses look like a missing predictor more than a few discrete regimes.
+     ERA5 maps: `era5_fetch_events.py` and `plot_era5_event_maps.py` now take `--set SAN-IPL+ --dates ...`
+     (worst miss hour on each date) -> `images/case_studies/san_ipl_pos/era5/`. Four cases, three types:
+       (a) 2017-05-26 10Z, WWAC1 74 mph, obs gradient +8.1 (ERA5 +7.9): late-May onshore surge into a deep
+           desert heat low (~996 hPa); weak flow aloft (700 hPa ~20 kt). Gradient captured, magnitude missed.
+       (b) 2023-01-03 14Z (TNSC1 63, WWAC1 62, gradient +2.6) and 2025-12-03 09Z (WWAC1 65, TNSC1 59, +4.6):
+           strong W-NW flow aloft over SoCal (700 hPa 33-41 kt at Whitewater, 500 hPa jet 80-100 kt; 2025 an
+           inside-slider trough from the north) with a weak-moderate surface gradient. Momentum aloft / mountain
+           wave, the same mechanism as the Reno (SFO-WMC+) misses.
+       (c) 2023-07-31 11Z (FHCC1 Fish Creek Mtns 54, WWAC1 53, gradient +1.4): summer, flow aloft < 10 kt,
+           ERA5 Whitewater gust 5 kt. Convective outflow (monsoon); not resolvable from these fields.
+     (A systematic 700 hPa test for SoCal was considered but not pursued: the user keeps the model gradient-only.)
+   - SAN-IPL- regimes (2026-11-21). Set qualifies from 2020-10: 422 strong-gust hours, 237 under-forecast (56%),
+     42 episodes; miss share 67% at < 3 hPa vs 42% at 3-6 hPa; DJF/SON almost entirely. Top stations: Highland
+     Springs, Wiley Ridge, Chino Hills, Miller Ranch (HRICH, WA, never sets). ERA5 maps (6 worst, distinct
+     episodes) -> `images/case_studies/san_ipl_neg/era5/` (map extended to 43N for the Great Basin high).
+       Santa Ana, 4 of 6: 2021-01-19 20Z (78 mph, obs gradient 3.4; closed low dropping down the coast),
+           2025-01-08 16Z (66 mph, 0.3; Palisades/Eaton fire windstorm), 2025-01-21 03Z (65 mph, 2.3),
+           2024-03-14 22Z (57 mph, 0.7; cut-off low overhead, northerly flow). Great Basin high 1032-1044 hPa,
+           NE-E flow aloft (700 hPa 27-55 kt at Highland Springs in 3 of 4). SAN-IPL runs E-W along the border, south
+           of the main Great Basin-to-coast pressure gradient, so it reads only 0.3-3.7 hPa in strong Santa Anas.
+       Not offshore, 2 of 6: 2025-12-24 15Z (58 mph, Miller Ranch 68): pre-frontal S-SW wind ahead of a deep Pacific
+           low (~988 hPa off NorCal; 700 hPa 200 deg / 48 kt); SAN-IPL negative from falling pressure to the west.
+           2023-08-20 16Z (60 mph): Tropical Storm Hilary (SE 700 hPa 48 kt).
+     Reading: the negative sign mixes Santa Anas with pre-frontal and tropical southerly events, and in Santa Anas
+     the gradient is a weak proxy. Explains the error; no model change.

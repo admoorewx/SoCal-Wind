@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download ERA5 hourly fields for the worst SFO-WMC+ gust-miss events (or any given dates).
+"""Download ERA5 hourly fields for strong-gust miss events of a gradient set (or any given dates).
 
 One file per UTC day and dataset, all 24 hours, in /mnt/d/ERA5 using the folder's existing naming:
   era5_sfc_YYYYMMDD.nc   single levels: 2 m temperature, mean sea-level pressure, 10 m u/v wind,
@@ -8,15 +8,18 @@ One file per UTC day and dataset, all 24 hours, in /mnt/d/ERA5 using the folder'
 Domain 30-50N, 135-110W, 0.25 deg (CDS area = N/W/S/E). Existing files are never overwritten (the folder
 also holds files from other work); a file is written to a .part name and renamed when complete.
 
-Days: by default the UTC days covering each event's peak hour and the 12 h before it, for the events
-chosen by plot_sfo_wmc_stations.pick_events (6 worst SFO-WMC+ strong-gust misses, distinct by > 24 h).
-Obs hours end at :56, so an event's ERA5 hour is the next full hour.
+Days: the UTC days covering each event's peak hour and the 12 h before it. Events are, by default, the
+6 worst SFO-WMC+ strong-gust misses (plot_sfo_wmc_stations.pick_events, distinct by > 24 h); with --set and
+--dates, the worst under-forecast strong-gust hour on each given UTC date for that set (from
+plot_strong_misses.py's strong_hours.parquet). Obs hours end at :51-:56, so an event's ERA5 hour is the next
+full hour.
 
 Needs ~/.cdsapirc and accepted ERA5 licences on the CDS site.
 
 Usage:
-  python era5_fetch_events.py                 # SFO-WMC+ events
-  python era5_fetch_events.py 2024-12-16 ...  # explicit UTC days
+  python era5_fetch_events.py                                   # SFO-WMC+ events
+  python era5_fetch_events.py --set SAN-IPL+ --dates 2017-05-26 2023-01-03
+  python era5_fetch_events.py 2024-12-16 ...                    # explicit UTC days
 """
 import argparse
 import os
@@ -24,6 +27,9 @@ import sys
 
 import pandas as pd
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+STRONG = os.path.normpath(os.path.join(HERE, "..", "data", "v2", "derived", "models", "strong_misses",
+                                       "strong_hours.parquet"))
 ROOT = "/mnt/d/ERA5"
 AREA = [50, -135, 30, -110]
 SFC = ["2m_temperature", "mean_sea_level_pressure", "10m_u_component_of_wind", "10m_v_component_of_wind",
@@ -33,12 +39,32 @@ LEVELS = ["500", "700", "850"]
 LEAD_H = (12, 6, 0)
 
 
-def event_hours():
-    """ERA5 analysis hours (UTC) for each SFO-WMC+ event: peak, -6 h, -12 h."""
-    from plot_sfo_wmc_stations import load, pick_events
-    *_, M = load()
+def worst_on_dates(sg, dates):
+    """The worst under-forecast strong-gust hour of set sg on each UTC date (rows of strong_hours)."""
+    M = pd.read_parquet(STRONG)
+    M = M[(M.signed_gradient == sg) & (M.variable == "gust") & M.miss & (M.err < 0)]
+    day = M.time_utc.dt.strftime("%Y-%m-%d")
     out = []
-    for r in pick_events(M):
+    for d in dates:
+        m = M[day == d]
+        if m.empty:
+            raise SystemExit(f"{sg}: no under-forecast strong-gust miss on {d}")
+        out.append(m.loc[m.err.idxmin()])
+    return out
+
+
+def event_hours(sg="SFO-WMC+", dates=None):
+    """[(peak, [peak - 12 h, peak - 6 h, peak])] in UTC. Default: the 6 worst SFO-WMC+ misses."""
+    if dates:
+        rows = worst_on_dates(sg, dates)
+    else:
+        if sg != "SFO-WMC+":
+            raise SystemExit("--dates is required for sets other than SFO-WMC+")
+        from plot_sfo_wmc_stations import load, pick_events
+        *_, M = load()
+        rows = pick_events(M)
+    out = []
+    for r in rows:
         peak = r.time_utc.ceil("h")
         out.append((peak, [peak - pd.Timedelta(hours=h) for h in LEAD_H]))
     return out
@@ -59,12 +85,14 @@ def request(c, dataset, day, extra, target):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("days", nargs="*", help="UTC days YYYY-MM-DD (default: SFO-WMC+ events)")
+    ap.add_argument("days", nargs="*", help="explicit UTC days YYYY-MM-DD (default: events of --set)")
+    ap.add_argument("--set", default="SFO-WMC+", help="signed gradient set (default SFO-WMC+)")
+    ap.add_argument("--dates", nargs="*", help="UTC dates of the set's events (worst miss hour on each)")
     a = ap.parse_args()
     if a.days:
         days = sorted({pd.Timestamp(d) for d in a.days})
     else:
-        ev = event_hours()
+        ev = event_hours(a.set, a.dates)
         for peak, hrs in ev:
             print(f"event peak {peak:%Y-%m-%d %H}Z, maps at " + ", ".join(f"{h:%d %H}Z" for h in hrs))
         days = sorted({h.tz_localize(None).normalize() for _, hrs in ev for h in hrs})
