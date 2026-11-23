@@ -268,5 +268,18 @@ Why not the alternatives (analysis 2026-11-16, 2015-2025):
        Not offshore, 2 of 6: 2025-12-24 15Z (58 mph, Miller Ranch 68): pre-frontal S-SW wind ahead of a deep Pacific
            low (~988 hPa off NorCal; 700 hPa 200 deg / 48 kt); SAN-IPL negative from falling pressure to the west.
            2023-08-20 16Z (60 mph): Tropical Storm Hilary (SE 700 hPa 48 kt).
-     Reading: the negative sign mixes Santa Anas with pre-frontal and tropical southerly events, and in Santa Anas
-     the gradient is a weak proxy. Explains the error; no model change.
+     Reading: the negative sign mixes Santa Anas with pre-frontal and tropical southerly events. In Santa Anas the
+     own gradient is a weak proxy, BUT gbt_all already uses the offshore pairs (gust speed model gain: SAN-LAS 0.42,
+     LAX-DAG 0.19, own |grad| 0.13), so the remaining under-forecast is upper support (NE flow aloft 27-55 kt) that
+     sea-level gradients do not see, as for SFO-WMC+. Explains the error; no model change.
+   - Jan 2025 Santa Ana event check (2026-11-21): `scripts/plot_event_timeseries.py` -> `images/case_studies/events/
+     20250106/` (timeseries.png: 8 SoCal pairs, both signs; summary.png), stats -> `derived/models/case_studies/
+     event_20250106_stats.csv`. Window Jan 6 04:00 - Jan 10 04:00 PST, out-of-fold gbt_all.
+     Timing and evolution tracked well (onset Jan 7 morning, decline Jan 8 evening, second surge Jan 9). Sustained
+     good: bias -3.3 .. +0.8, RMSE 2.8-4.8 mph. Gust peaks badly under-forecast: obs 77-86 vs fc 49-60 mph on the
+     offshore sets; worst hours -30 to -43 mph (Jan 7 afternoon-evening); window bias -8 to -11.
+     Key: the gradients were strong but NOT extreme (2015-24 hours at or above the event max: LAX-TPH 69, SAN-LAS 79,
+     LAX-PMD 740, LAX-DAG 1041), yet this event holds 8-10 of each set's 20-26 hours > 70 mph. At these gradients the
+     model is unbiased on average (e.g. LAX-DAG |grad| >= 4.9: obs mean 44, fc 44; obs p90 57). So the winds were far
+     beyond what the sea-level gradients signalled (upper support: 700 hPa NE ~43 kt), a limit of any gradient-only
+     model rather than of the GBT form. Forecasts never exceed 60-66 mph in the full record.
