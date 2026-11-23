@@ -1,0 +1,440 @@
+# NWP verification plan: GBT vs numerical models on the 2026 holdout
+
+Status: Phase 0 pilot done 2026-11-22 (GO). Scope revised 2026-11-22: sustained wind only, 2026 data only, no wind
+direction (see "Scope revision" below). Next: Phase 1 fetcher.
+
+## Goal and success criterion
+
+**Question:** at each lead time, is the GBT forecast more accurate than the NWP model's own wind forecast? The GBT forecast is driven by the NWP model's sea-level pressure. Both are scored against the observed station-set targets.
+
+**Success criterion (agreed, first target):** pooled GBT-NWP RMSE beats raw NWP RMSE in every lead-day bin, with the 95% bootstrap interval of the difference excluding 0. Sustained and gust get separate verdicts. The project counts as worthwhile if GBT wins against GFS.
+
+## Decisions already made (2026-11-21)
+
+| Topic | Decision |
+|---|---|
+| Model stays gradient-only | Yes. Upper-air inputs were ruled out to keep deployment simple. The flow-aloft limitation is documented (see the Jan 2025 case in wind_model_plan.md). |
+| Data source | **Open-Meteo**, not raw GRIB. Open-Meteo handles point extraction and supplies `pressure_msl`. |
+| Models | The pipeline must work for **any Open-Meteo model** through a config table. GFS comes first. |
+| Lead times | Day 0 to **Day 7** at minimum. |
+| Storage | All data on `/mnt/d` (see Storage). |
+| Models scored | The frozen final `gbt_all` models in `data/v2/derived/models/gbt/models/` (trained 2015-2025). They are never retrained. |
+| Holdout window | 2026-01-01 to 2026-10-31. Observations currently end on 2026-10-31. |
+
+## What Open-Meteo provides (docs read 2026-11-21)
+
+- **Previous Runs API.** Variables take a suffix `_previous_dayN` with N = 0..7. Day 0 is the latest run. `_previous_day1` is "the value predicted 24 hours before valid time", day 2 is 48 h before, and so on up to day 7. This gives **lead-day bins of hourly valid times**, not individual runs. Day 7 is the maximum. Most models are archived from Jan 2024. The Historical Forecast table gives GFS from 2021-03-23, ECMWF IFS 0.25° from 2024-02-03 and NBM from 2024-10-08.
+- **Single Runs API** (`run=YYYY-MM-DDTHH:MM`). Gives the full horizon of one initialisation. This is the fallback if previous-runs is missing a variable or we want leads beyond Day 7.
+- **Historical Forecast API.** Stitches only the first hours of each run, so it can't be used for lead-time verification.
+- **Variables.** `pressure_msl`, `wind_speed_10m` (instantaneous), `wind_direction_10m`, `wind_gusts_10m` ("maximum of the preceding hour", which matches our hourly-max gust target better than an instantaneous gust).
+- **Point selection.** `cell_selection` = `land` (default: a land cell of similar elevation, using a 90 m DEM), `sea` or `nearest`. `elevation` sets statistical downscaling, and `elevation=nan` turns it off. The docs don't say which variables downscaling changes. The response returns the coordinates of the chosen grid cell.
+- **Free tier.** Limits are 600 calls/min, 5,000/hour, 10,000/day and 300,000/month. A request with more than 10 variables or more than 2 weeks of data counts as several calls. From the doc examples the weight is about (variables/10) × (weeks/2), with each factor at least 1. Several coordinates can go in one request, comma-separated, but how multi-location requests are counted isn't documented. The free tier is **non-commercial only**. Data is **CC BY 4.0**, so attribution is required.
+
+### Risks to settle in the Phase 0 pilot, before writing the main pipeline
+
+1. **Free access to the archive.** The pricing table marks Previous Runs as free, but the FAQ says historical APIs need a paid plan. The pilot must test real requests without a key.
+2. **Gusts in Previous Runs.** No wind-gust variable appears in the previous-runs variable list. Test `wind_gusts_10m_previous_day1`. If it fails, take gusts from the Single Runs API: one 00Z run per day, leads cut into the same day bins.
+3. **Pressure reduction is NOT necessarily solved by Open-Meteo.** `pressure_msl` is the model's own sea-level reduction at a grid cell, and its method isn't documented. Our models were trained on METAR SLP, which is reduced differently. That matters most at the 7 stations above 580 m: TPH 1,654 m, RNO 1,342 m, WMC 1,311 m, LMT 1,244 m, PMD 775 m, WJF 711 m and NID 696 m. Phase 2 checks this on 2024-2025 and applies a correction only if needed.
+4. **Lead definition.** Confirm with a known case that `previous_dayN` behaves as documented (the value issued N×24 h before valid time). Record which run hours feed it.
+5. **Downscaling and cell choice.** For one mountain station (e.g. TPH) and one RAWS site, compare `elevation` default vs `nan` and `cell_selection` land vs nearest, to see whether pressure or wind changes.
+6. **Model availability.** HRRR is marked "Discontinued 2026-11-30", and ICON Global is too. Check whether their archives stay reachable after that date. If HRRR or ICON is wanted as an extra baseline, fetch it **before 2026-11-30**.
+
+## Storage (all on /mnt/d)
+
+```
+/mnt/d/NWP/open_meteo/                       # new; separate from /mnt/d/ERA5 and /mnt/d/Verification (other work)
+  raw/<model>/<stid>.json.gz                 # one cached API response per station: resume and audit
+  points/<model>/points.parquet              # long table: valid_utc, stid, lead_day (0-7), pressure_msl_hpa,
+                                             #   wind_speed_mph, grid_lat, grid_lon, grid_elev_m
+  manifest_<model>.csv                       # stid, request url (no key), status, weighted calls, fetched_at
+/mnt/d/socal/data/v2/derived/verification/   # derived tables (already on /mnt/d)
+  holdout_targets_signfree.parquet           # targets for every signed set at every hour (Phase 3)
+  <model>/forecasts.parquet                  # GBT-NWP, GBT-obs, raw-NWP and obs per set, valid time and lead day
+  <model>/scores_*.csv, bootstrap_*.csv
+/mnt/d/socal/images/verification/<model>/    # figures
+```
+
+## Model config (makes the pipeline work for multiple models)
+
+A single table in `scripts/nwp_config.py`:
+
+| key | open_meteo_model | api | max_lead_day | gusts_from | notes |
+|---|---|---|---|---|---|
+| gfs | GFS 0.25° global id (confirm the exact string in the pilot; NOT the "seamless" blend, which mixes in HRRR over the US) | previous_runs | 7 | previous_runs or single_runs | first model |
+| ecmwf | ECMWF IFS 0.25° | previous_runs | 7 | ... | optional later |
+| nbm | NCEP NBM CONUS | previous_runs | 7 | ... | strongest operational bar; archive from 2024-10-08 |
+| hrrr | NCEP HRRR CONUS | previous_runs | 2 | ... | 0-48 h only; discontinued 2026-11-30 |
+
+Every script takes `--model <key>`. Nothing downstream hard-codes GFS.
+
+## Phases
+
+### Phase 0: pilot (about 1 hour, a few hundred calls)
+- Hit the Previous Runs API without a key for KLAX and KTPH plus 2 RAWS stations, January 2026, days 0-7.
+- Settle risks 1-6 above. Record the exact model identifier string and the real weighted-call count per request.
+- **Output:** a short "Pilot results" section appended to this file, and an exact call budget (see the estimate below).
+- **Go / no-go:** if the archive needs a paid plan or a key variable is missing, stop and decide with the user: paid plan, Single Runs API, or AWS GRIB.
+
+### Phase 1: fetcher, `scripts/nwp_fetch_openmeteo.py --model gfs --start 2026-01-01 --end 2026-10-31`
+- Points:
+  - The 22 gradient stations: `pressure_msl`, days 0-7.
+  - Every station in `station_sets.csv` (425): `wind_speed_10m`, days 0-7. No direction (not used by targets or
+    raw-NWP statistics). Gust and 80 m wind deferred (sustained first).
+- Everything covers 2026-01-01 to 2026-10-31 only (revised 2026-11-22; was 2024 onward for pressure).
+- One location per request, all lead days, 2-week chunks if needed. Throttle below the per-minute, hourly and daily limits.
+- Resumable: a station is skipped if its raw cache exists and the manifest says OK. Responses are written to `.part` files and renamed when complete.
+- Units: request mph and hPa, timezone GMT. Record the returned grid-cell lat, lon and elevation.
+
+**Call budget (revised 2026-11-22, measured cost formula from the pilot):** 22 x 17.4 = ~380 (pressure) + 425 x 17.4 =
+~7,400 (speed) = **~7,800 calls**, under one day's 10,000 limit. The 5,000/hour limit means about 2 hours of fetching.
+
+### Phase 2: pressure check and correction, `scripts/nwp_check_pressure.py --model gfs` (2026, leave-one-month-out)
+- For each gradient station, compare NWP `pressure_msl` at day 0 with METAR SLP (`slp1_hpa` / `slp2_hpa` in gradient_timeseries.parquet) at matched hours.
+- Report bias, SD and dependence on temperature and season. Report the resulting **gradient** error per pair, by lead day.
+- Revised 2026-11-22: there is no 2024-2025 NWP data, so the check uses 2026. It compares NWP pressure only with
+  observed SLP and never sees wind observations.
+- **Correction, leave-one-month-out:** each 2026 month is corrected with per-station coefficients fitted on the other 9
+  months, so no hour is corrected with a fit that included it. Linear, optionally with a seasonal term.
+- **Decision rule** (fixed now): use the correction only if the leave-one-month-out gradient RMSE is lower than
+  uncorrected.
+  - Correcting per station rather than per pair keeps all 24 GBT inputs consistent.
+- Output: `verification/<model>/pressure_correction.json` (coefficients, or "none") and figures.
+
+### Phase 3: sign-independent holdout targets, extending `scripts/build_targets.py` or adding a new script
+- For every signed set and every 2026 hour, compute the target from that set's stations: sustained = set P75, gust = nearest-rank P90 with the 2-station floor and the 50%-gust-reporting rule. Same rules as training, **whatever the observed gradient sign**.
+- Needed because the forecast sign chooses which model runs (Phase 4), so its target must exist even when the observed sign differs.
+- Keep a column for the observed gradient sign so results can be split later.
+- **DONE 2026-11-22:** `scripts/build_holdout_targets_signfree.py` (40 s). It reuses `build_targets.table_for` /
+  `add_time`, so the rules are identical by construction.
+  - Outputs: `derived/verification/holdout_targets_signfree_{sustained,gust}.parquet`, plus `_check.csv` and `_meta.json`.
+  - Time grid: station1's matched METAR times, one per valid hour (`valid_utc` = obs time rounded up to the hour).
+    Columns `gradient_hpa` (NaN if missing), `obs_sign`, `obs_sign_matches`.
+  - Sustained: 183,742 qualifying set-hours, of which 81,654 have observed sign = set sign; 1,774 have no observed
+    gradient and 2,596 have gradient 0.
+  - Check: every same-sign row reproduces `targets/<var>_holdout.parquet` exactly (max diff 0.0). The only rows
+    absent are 12 per variable at 2026-10-31 23:5x, which map to valid 2026-11-01 00Z, outside the window.
+  - Known gap: KOTH METAR outage Apr-Jul 2026 (14-208 hours per month), so OTH-ACV- has 4,485 qualifying hours. No
+    station1 time means no matched winds; this would need a re-match on an hourly grid if it matters.
+
+### Phase 4: forecasts, `scripts/nwp_run_gbt.py --model gfs`
+- For each valid hour and lead day, build all 22 gradients from corrected NWP pressure: the pair's own |grad| plus 19 signed other-pair gradients, hour sin/cos and day-of-year sin/cos. This gives the 24 inputs, in exactly the training column order. Missing values stay NaN.
+- Run the frozen `gbt_all` models:
+  - The **forecast sign** picks the + or − set model. Hours whose sign has no model are left out, as in training.
+  - Run linear (speed) and logistic (event probability) for sustained and gust.
+- Also run **GBT-obs**: the same models driven by the observed 2026 gradients, as the upper limit with perfect pressure.
+- Also compute **raw NWP**: the set statistic (P75 sustained, P90 / k-th gust) of the NWP winds at the set's stations, using only stations that reported at that hour, the same as the obs target.
+- Obs windows end at :51-:56. Match them to the next full hour (ceil), as in all earlier work.
+- Before running, write SHA-256 checksums of the model files to `verification/model_checksums.txt`.
+- **DONE 2026-11-23 (sustained):** `scripts/nwp_run_gbt.py --model gfs` (3 min) writes
+  `derived/verification/gfs/forecasts_sustained.parquet`: 1,480,832 rows = 26 sets x hours x 8 lead days.
+  - Columns: own-pair gradient obs / nwp_raw / nwp_corr; sel_* (does that sign pick this set); linear GBT
+    (`gbt_*`) and logistic probabilities (`p15`/`p20`/`p30_*`) for each input; raw NWP P75 at reporting stations
+    (`nwp_p75_rep`) and over all set stations (`nwp_p75_all`).
+  - GBT runs at every row; score variant X on `sel_X & qualifies`.
+  - SLP correction from `pressure_calibration/coefficients_2025.json` (shared design in `nwp_config.slp_correction_design`).
+  - Checksums of the 95 sustained gbt_all models are in `verification/model_checksums.txt`.
+  - **Feature check (`--check`):** the builder reproduces the training features for all 26 sets on 2025 exactly
+    (0 feature diffs, 0 NaN mismatches, identical predictions). Valid hour V uses time features and other-pair
+    gradients at V-1h, as in training.
+  - Raw NWP uses exactly the target's reporting stations (n_nwp_rep == n_reporting on 100% of rows).
+  - **First look, pooled, rows chosen by the corrected forecast sign (NOT the Phase 5 verdict):**
+    - RMSE days 0-7, GBT-NWP corrected: 2.99 3.13 3.35 3.52 3.77 4.15 4.53 4.99 mph.
+    - Raw NWP P75: 4.63 4.81 4.94 5.05 5.21 5.49 5.71 5.95.
+    - GBT-NWP uncorrected: 4.09 ... 5.65. GBT-obs (perfect pressure): 2.71.
+    - Raw NWP is biased low, -2.2 to -2.5 mph (instantaneous 10 m wind vs hourly-max obs; SAN-IPL- -10, LAX-DAG-
+      -6.6). Its error SD is 3.89 at day 0 and 5.54 at day 7, still above GBT's 2.99 / 4.99.
+    - Correlation with obs: GBT 0.86 -> 0.60, NWP 0.76 -> 0.49 (days 0 -> 7).
+    - Forecast sign correct on 89% (day 0) to 77% (day 7) of rows.
+    - Raw NWP beats GBT at day 0 in 5 of 26 sets: LAX-TPH+, RDD-SAC+/-, SAC-RBL+/-. At day 3 in 1 set.
+
+### Phase 5: scoring, `scripts/nwp_verify.py --model gfs`
+- **Speed:**
+  - RMSE, MAE and bias by lead day (0-7), per set and pooled.
+  - Skill score = 1 − MSE(GBT-NWP) / MSE(raw NWP).
+  - Breakdown by observed-speed bin, to see strong winds.
+- **Events:**
+  - Brier score of GBT probabilities against raw-NWP yes/no exceedance.
+  - Hit rate, false-alarm rate and CSI. The probability cut-off comes from the training out-of-fold results, not the holdout.
+- **NWP pressure error (added 2026-11-22):** document the GFS SLP forecast error itself in 2026 by lead day, to
+  separate NWP input error from GBT skill. Cover per-station bias, SD, RMSE and diurnal bias, and per-pair gradient
+  RMSE, r and sign agreement (same metrics as `nwp_pressure_check_pilot.py`). Relate gradient error to the GBT-obs ->
+  GBT-NWP loss by lead day. No pressure correction for now (user, 2026-11-22). Revisit only if needed.
+- **Significance:** paired bootstrap by whole days, 1,000 resamples, giving 95% intervals on the RMSE difference.
+- **Splits:** forecast sign right or wrong; season; set.
+- **Figures:**
+  - RMSE vs lead day (GBT-NWP, raw NWP, GBT-obs, climatology).
+  - Skill by set.
+  - Time series for the 3-5 largest 2026 wind events, in the style of `plot_event_timeseries.py`.
+
+- **DONE 2026-11-23 (sustained, GFS):** `scripts/nwp_verify.py --model gfs` (35 s). Scores in
+  `derived/verification/gfs/scores/`; figures in `images/verification/gfs/` (rmse_by_lead, skill_by_set,
+  rmse_by_speed_bin_{all,offshore}, brier_by_lead, pressure_error_and_loss, events/<set>.png).
+  - Main rows: qualifying set-hours chosen by the corrected forecast sign.
+  - Extra baseline: per-set, per-lead bias-corrected raw NWP, with the bias taken from 2026 itself (an ORACLE,
+    generous to NWP).
+  - Offshore group (my labelling, to confirm with the user): LAX-BFL-, LAX-DAG-, LAX-PMD-, LAX-TPH-, LAX-WJF-,
+    SAN-IPL-, SAN-LAS-, SBA-SMX-.
+  - **VERDICT (agreed criterion: GBT-NWP RMSE significantly below raw NWP at every lead, 95% day-block bootstrap):
+    MET**, for all sets and for the offshore group.
+    - All sets, RMSE difference -1.64 (day 0) to -0.96 mph (day 7); MSE skill 0.58 -> 0.30.
+    - Offshore: -2.51 to -1.12 mph; skill 0.68 -> 0.29.
+    - Against the oracle bias-corrected NWP: significant at 8/8 leads for all sets (skill 0.24 -> 0.08) and 7/8
+      offshore (day 7 CI -0.43..+0.20).
+  - **Strong winds (lead 1, all sets), RMSE GBT / raw / bias-corrected:**
+    - 20-30 mph: 4.75 / 8.79 / 5.94. >= 30 mph: 8.49 / 16.26 / 11.37.
+    - Bias at >= 30 mph: GBT -7.1, raw NWP -14.6. Offshore >= 30 mph: GBT 6.59 RMSE (bias -5.7) vs raw 16.29 (bias -15.3).
+    - Below 10 mph raw NWP is slightly better (2.34 vs 2.48): GBT is biased +1.2 in calm hours.
+  - **Events:** GBT Brier is below raw and bias-corrected NWP yes/no at every lead for >= 15 and >= 20 mph.
+    - CSI >= 20 at day 1: GBT 0.49, NWP 0.22, bias-corrected 0.35.
+    - >= 30 mph is rare (base rate 0.8%). CSI day 1: GBT 0.19 vs NWP 0.04. The GBT Brier is about the same as
+      climatology after day 4.
+  - **By set:** raw NWP wins at short lead in RDD-SAC+/-, SAC-RBL+/- (Sacramento Valley) and LAX-TPH+ (day 0 only).
+    SBA-SMX- skill is about 0 from day 2. The bias-corrected NWP also beats GBT in LAX-DAG+ and SAN-LAS+ at short lead.
+  - **Pressure loss:** GBT-obs 2.74 -> GBT-corr 3.04 (day 0) .. 5.08 mph (day 7), on rows where both signs pick the
+    set. Median corrected gradient RMSE 0.85 -> 2.08 hPa.
+  - **Top-5 event days per set** (+/-24 h windows; rows chosen by sign):
+    - All events RMSE GBT 4.30, raw 8.09, bias-corrected 5.62 (day 1). Offshore 4.75 / 10.63 / 7.12.
+    - Offshore mean event peak: obs 32.8, GBT-obs 29.5, GBT day 1 27.0, day 3 26.7; raw NWP day 1 23.2, day 3 21.8.
+    - **Caveat:** the SoCal offshore sets share about 6 event dates (2026-01-11, 10-16, 03-07, 02-04, 04-03, 01-17),
+      so the event results rest on about 6 independent events.
+    - Mar 7: GBT day 1 is worse than day 3 at LAX-PMD/TPH (22-24 vs 29-30). Possibly the March 2026 SLP-correction
+      residual; check.
+
+  - **D5/D7 event plots (2026-11-23):** `images/verification/gfs/events_d5d7/<set>.png`. Same event days as
+    `events/` (days 1/3). `event_window_scores.csv` now holds leads 1, 3, 5 and 7.
+    - Offshore event-window RMSE, GBT vs raw NWP: 4.6 vs 9.9 (day 1), 5.8 vs 10.9 (day 3), 6.4 vs 11.9 (day 5),
+      8.7 vs 12.7 mph (day 7).
+    - Raw NWP has the lower window RMSE in 0/40 offshore windows at day 5 and 1/40 at day 7; 19/90 and 17/90 in
+      the other sets.
+    - Mean offshore peak: GBT 26.1 (day 5) and 25.2 (day 7) vs obs 32.9; raw NWP 22.3 and 20.9.
+    - The day-7 GBT lines show 6-hourly steps. previous_dayN switches source run every 6 h (lead 24N..24N+5), so
+      run-to-run jumps appear as steps.
+
+### Phase 6: write-up
+- Verdict against the success criterion.
+- The error split: GBT-obs → GBT-NWP shows the loss from pressure-forecast error.
+- Caveats:
+  - Instantaneous vs hourly-max sustained wind.
+  - Open-Meteo grid-cell selection.
+  - The Jan 2025 flow-aloft limitation.
+  - CC BY 4.0 attribution for Open-Meteo.
+- Optionally repeat for NBM or ECMWF using `--model`.
+
+## Rules for keeping the holdout clean
+- Every choice is made on training out-of-fold results or fixed in advance: probability cut-offs, lead bins, cell
+  selection. The pressure correction uses 2026 pressure only (never wind obs), cross-fitted by month (Phase 2).
+- 2026 is used once, in Phase 5, with the criterion above.
+- If something has to change after looking at 2026, log it here as a post-hoc change.
+
+## Pilot results (Phase 0, run 2026-11-22). Verdict: GO
+
+User findings (2026-11-22): Previous Runs is free (no subscription); the free tier's non-commercial terms are fine
+(pure research). Open-Meteo does not document its `pressure_msl` reduction; `surface_pressure` is not what we want.
+Scope: **sustained wind first**; gusts later, with 80 m wind as a possible gust-potential proxy.
+
+Pilot (keyless requests; raw responses and `pilot_log.csv` in `/mnt/d/NWP/open_meteo/pilot/`):
+1. **Access:** HTTP 200 with no key. No key is needed. The user has a key in reserve (store it in a file, never in chat).
+2. **Model ID: `gfs_global`.** It is itself a blend of two grids: `pressure_msl`, 80 m wind and gusts are identical to
+   `ncep_gfs025` (0.25 deg); 10 m wind comes from `ncep_gfs013` (returned cell e.g. 33.915, -118.359 for KLAX).
+   `ncep_gfs025` has no 10 m wind; `ncep_gfs013` has no pressure. `gfs_seamless` differs (HRRR blend), so don't use it.
+3. **Variables under `_previous_dayN`:** pressure_msl, wind_speed_10m, wind_direction_10m, **wind_gusts_10m (it IS
+   available, contrary to the variable list)**, wind_speed_80m. Jan 2026 at 4 stations: 0% missing, all 40 columns.
+4. **Lead definition (checked against Single Runs, June 2026):** day N comes from the latest run initialised at or
+   before valid - 24N h, so lead = 24N + (valid hour mod 6) h. Day 0 = 0-5 h (near-analysis), day 1 = 24-29 h, ..., day
+   7 = 168-173 h. Cycles are 00/06/12/18Z.
+5. **Cell selection and downscaling:** `cell_selection` land vs nearest and `elevation` default vs nan give
+   **identical** pressure and wind values at KTPH and JULC1 (only the reported grid elevation changes). Use the defaults.
+6. **Archive start:** `previous_day1` from valid 2024-01-19 12Z (day 7 from 2024-01-25 12Z). Phase 2 uses 2024-01-26
+   onward. **Single Runs** for GFS exist only from partway through 2026 (2026-01-04 is not available; 2026-06-01 is),
+   so it can't replace Previous Runs for the holdout.
+7. **Cost (measured from the `X-RateLimit-Cost` header):** cost = max(1, n_vars/10 x n_days/14), not rounded up.
+   Each lead day counts as a variable. Requests take 1-2 s.
+
+**Call budget (GFS, measured formula):**
+
+| Fetch | Stations | Calls |
+|---|---|---|
+| pressure, days 0-7, 2024-01-18 to 2026-10-31 | 22 gradient | ~1,300 |
+| speed + dir, days 0-7, 2026 holdout | 425 (all set stations) | ~14,800 |
+| + gust | 425 | +7,400 |
+| + 80 m speed | 425 | +7,400 |
+
+Limits: 10,000/day and 5,000/hour, so speed + dir + pressure is about 2 days of fetching.
+
+## Scope revision (2026-11-22, user)
+- Data from **2026-01-01** onward only. No 2024-2025 fetch.
+- The pressure check uses 2026, cross-fitted by month (Phase 2).
+- **Sustained wind only:** fetch `wind_speed_10m` + `pressure_msl`. No direction. Gust and 80 m wind come later.
+- The Phase 4 and 5 gust items wait until the gust phase.
+
+## Pressure check pilot, Jan 2025 (2026-11-22)
+Script `scripts/nwp_pressure_check_pilot.py` (39 weighted calls; raw data in `/mnt/d/NWP/open_meteo/pilot/pressure_check/`).
+Outputs are in `data/v2/derived/verification/gfs/pressure_check_pilot/` and `images/verification/gfs/pressure_check_pilot/`.
+GFS `pressure_msl` minus METAR SLP, obs matched to the next full hour.
+- **Low stations (< 160 m):** day-0 bias -1.1 to +0.6 hPa, SD 0.4-0.6, r >= 0.99. Diurnal bias range < 0.9 hPa.
+- **High stations (> 580 m):** SD 1.1-2.2 hPa, diurnal bias range 1.3-3.1 hPa (LMT 3.1, TPH 2.8, RNO 2.4).
+  NWP is too high around 09-12Z (night) and too low around 21-00Z (afternoon). This matches the expected signature of
+  a reduction that uses the current temperature, whereas METAR SLP uses a 12-h mean.
+- **Day-0 gradients:** median RMSE 1.14 hPa, r 0.94, skill vs the obs-gradient variance 0.84.
+  - Worst pairs: LAX-WJF 2.3, LAX-TPH 2.3, SFO-WMC 2.0 (obs SD 3.4-5.1).
+  - Weak-gradient pairs suffer from bias: SBA-SMX skill -0.18; MFR-LMT 0.02; SAC-RDD sign agreement 0.62.
+- **By lead day (median RMSE):** 1.14, 1.54, 1.73, 1.69, 1.67, 1.99, 2.28, 2.38 hPa for days 0-7. The common low drift
+  with lead (about -0.5 hPa by day 3) largely cancels in the gradients.
+- **Correction potential** (fit on Jan 1-15 day 0, test on Jan 16-31, median gradient RMSE):
+  - Day 0: 1.11 raw, 0.99 with a station offset, 0.84 with a station x hour offset.
+  - Day 3: 1.65, 1.62, 1.54.
+  - Days 5-7: no gain.
+  - Not robust: SAN-LAS worsens from 0.82 to 1.66. The bias is regime-dependent, not a stable offset.
+- **Reading:** the values are reasonable. Random NWP error, not the reduction method, dominates beyond day 1.
+  Station x hour correction matters only at day 0-2 and on weak-gradient pairs. Only one winter month was checked.
+
+## Fetch and data QC, GFS 2026 (2026-11-22/23)
+- **Fetch:** 437/437 stations ok, 7,765 weighted calls, 1 h 56 min. Two SSL timeouts, both recovered on retry.
+  The points table has 25.5 M rows (51 MB). QC script: `scripts/nwp_qc_points.py`; outputs in
+  `derived/verification/gfs/qc/`.
+- **Clean:**
+  - 0 missing values.
+  - Pressure 988-1043 hPa; wind 0-27 m/s.
+  - No stuck values (longest identical run 8 h).
+  - Lead days are distinct: no hour with day 0 = day 1 at 90% or more of stations. Wind climatology is flat across
+    leads; pressure drifts about 1 hPa low by day 7.
+  - Grid cells 0.2-13.9 km from the station. 2 with |dz| > 300 m: WAPC1F1, where the station metadata says 2,979 m
+    but the DEM says 1,602 (a metadata error), and WMSC1.
+  - 74 set stations have no 2026 obs (mostly inactive). They are harmless because raw NWP uses only reporting stations.
+- **Day-0 wind vs matched max sustained:** median r 0.62 (5-95%: 0.22-0.81); NWP/obs mean ratio 0.94.
+  15 stations have r < 0.2, mostly Oregon valley RAWS and KSXT (r -0.24).
+- **FINDING: seasonal SLP-reduction bias at the high stations, much larger than the Jan 2025 pilot showed.**
+  Day-0 NWP minus METAR bias:
+  - TPH: -1.6 (Jan) to -6.6 hPa (Aug).
+  - WMC: -0.7 to -5.7. RNO: +0.3 to -4.4. LMT: +0.3 to -3.2. LAS: -1.3 to -3.6.
+  - LAX: -0.2 to -0.4 all year.
+  This fits GFS reducing with the current (hot) temperature, whereas METAR SLP uses a 12-h mean (and the
+  plateau correction).
+  Resulting day-0 gradient bias, annual / JJA, with the JJA obs gradient SD in brackets:
+  - LAX-TPH +3.9 / +5.8 [3.0]; SFO-WMC +3.1 / +5.1 [3.0]; SAC-RNO +1.8 / +3.7 [2.2]; MFR-LMT +1.4 / +2.9 [1.7].
+  - JJA sign agreement: SAC-RNO 0.47, MFR-LMT 0.45.
+  Every model takes all 22 gradients as inputs, so this reaches all sets. The no-correction decision needs
+  revisiting with the user before Phase 4.
+
+## SLP-convention calibration + station-pressure check (2026-11-23)
+Script `scripts/nwp_pressure_calibration.py --model gfs --fit-year 2025` (172 weighted calls). It fetches day-0
+pressure_msl, surface_pressure (elevation = station) and temperature_2m for the 22 gradient stations in 2025.
+Raw data in `/mnt/d/NWP/open_meteo/raw/gfs_calib/`; outputs in `derived/verification/gfs/pressure_calibration/`;
+figure `images/verification/gfs/pressure_calibration/high_station_bias_by_month.png`.
+- **Open-Meteo `surface_pressure` is derived, not a model field.** It equals pressure_msl at elevation=0 and changes
+  with the `elevation` parameter. It reproduces the hypsometric formula with the CURRENT 2 m temperature
+  (lapse-rate downscaled) exactly: 998.5 hPa, h=1653.8 m, T=36.3 C -> 834.4 vs 834.5.
+- **Station-pressure check (2025):** Open-Meteo pressure at station height vs observed station pressure
+  (obs_hourly pressure_mean_hpa).
+  - Bias -1.2 to +0.2 hPa; SD 0.3-1.1.
+  - High stations: seasonal range 0.6-1.4 hPa, against 3.0-6.2 for SLP. Diurnal range 0.9-2.1 hPa, against 1.8-4.7.
+  - **So at station level GFS is close to the observations; the SLP gap is mostly the reduction convention**
+    (current temperature vs METAR's 12-h mean + plateau correction).
+- **2025 SLP bias, high stations:** TPH -0.7 (Jan) to -6.0 (Aug); WMC +1.0 to -5.2; RNO +1.3 to -4.2; LMT +1.7 to -3.3.
+  2026 shows the same pattern (TPH -6.6 in Aug).
+- **Correction (form fixed in advance):** per station, err = pressure_msl - METAR SLP ~ 2 seasonal + 2 diurnal
+  harmonics + first seasonal x first diurnal interaction (13 terms). Fitted on 2025; coefficients in
+  `coefficients_2025.json`; applied to all lead days.
+  - **2025 leave-one-month-out CV, day-0 gradient RMSE:** median 1.07 -> 0.87 hPa, 21/21 pairs improved.
+    LAX-TPH 4.23 -> 1.85; SFO-WMC 3.65 -> 1.76; SAC-RNO 2.79 -> 1.57.
+  - **Decision rule met: USE the correction.**
+- **Verification period, 2026 pressure only (report, nothing tuned):**
+  - Median gradient RMSE by lead day: raw 1.11 / 1.31 / 1.42 / 1.63 / 1.78 / 2.02 / 2.16 / 2.49; corrected
+    0.84 / 1.02 / 1.18 / 1.35 / 1.49 / 1.67 / 1.87 / 2.04 (days 0-7). Median |bias| 0.64 -> 0.16 at day 0.
+  - LAX-TPH day 0: bias +3.86 -> +0.41, RMSE 4.70 -> 1.99.
+  - Residual: March 2026 is about -1.1 to -2.6 hPa at all high stations after correction (an anomalous month). A
+    climatological correction can't follow year-to-year temperature anomalies. A temperature-based correction (fit
+    on 2025, needs 2026 temperature_2m at all leads, ~380 calls) is a possible refinement.
+
+### Free METAR-style reduction test (2026-11-23, no calls)
+Script `scripts/nwp_slp_reduction_test.py`, using the cached 2025 day-0 data. Outputs `reduction_test_*_2025.csv`.
+- **Round trip:** reducing Open-Meteo surface_pressure with the current temperature reproduces pressure_msl to
+  0.03 hPa (median), 0.11 max. msl and sfc are exactly linked.
+- **A simple METAR-style reduction does NOT fix it.** Using T = (T_now + T_12h)/2 cuts the diurnal error range at
+  the high stations (median 1.96 -> 1.46 hPa) but leaves the seasonal range unchanged (3.46 -> 3.47) and the bias too
+  (TPH -0.7 Jan .. -6.0 Aug, the same as raw). Median day-0 gradient RMSE: raw 1.07, manual 12-h 1.03.
+- Adding a per-station constant offset (a stand-in for the plateau correction, leave-one-month-out) removes the
+  bias (gradient RMSE 0.92) but not the seasonal cycle.
+- The harmonic correction stays best: 0.87, with seasonal range 2.0 and diurnal range 0.3 at the high stations.
+- **Reading:** the seasonal gap is not current vs 12-h-mean temperature. METAR SLP at these stations behaves as
+  if reduced through a much cooler column in summer than the surface air (station-specific plateau-type
+  correction). GFS / Open-Meteo reduce through the hot surface temperature.
+- **Possible model-agnostic route (not done):** fit a "METAR-convention" emulator on OBS only (METAR SLP vs observed
+  station pressure, per station; obs_hourly has both). Apply it to any model's station pressure
+  (Open-Meteo surface_pressure at station elevation). Per model this needs only the station-pressure check, with no
+  model-specific fit.
+
+## Next questions (user, 2026-11-23) and probe results
+1. Is the SLP bias specific to Open-Meteo, or would raw GFS GRIB from AWS avoid the correction?
+2. Do other models have as severe a bias as GFS?
+3. Do other models show a similar RMSE reduction with GBT post-processing?
+
+**Open-Meteo Previous Runs probe** (KTPH, Jan 15 2025 and 2026; previous_day1/day7 for pressure_msl and wind_speed_10m):
+
+| model id | pressure | wind | lead days | 2025 available | note |
+|---|---|---|---|---|---|
+| ecmwf_ifs025 | yes | yes | 0-7 | yes | full candidate |
+| gem_global | yes | yes | 0-7 | yes | full candidate |
+| jma_gsm | yes | yes | 0-7 | yes | full candidate (coarse) |
+| icon_global | yes | yes | 0-6 | yes | marked discontinued on Open-Meteo 2026-11-30 |
+| ukmo_global_deterministic_10km | yes | 2026 only | 0-6 | pressure only | |
+| ncep_hrrr_conus / gfs_hrrr | yes | yes | 0-1 | yes | marked discontinued 2026-11-30 |
+| ecmwf_aifs025_single | yes | yes | 0-7 | NO (2026 only) | no 2025 calibration year |
+| ncep_nbm_conus | NO | yes | 0-7 | yes | raw-wind benchmark only |
+| ncep_nam_conus | partial | partial | 0-1 | no | skip |
+| meteofrance_arpege_world | yes | NO | 0-1 | yes | no raw-wind baseline; skip |
+| gem_hrdps_continental | - | - | - | - | no data at this location |
+
+**AWS (noaa-gfs-bdp-pds):** 0.25 deg pgrb2 with .idx files exist for 2024-2026. Each file has PRMSL (Shuell
+reduction), MSLET (Eta/Mesinger reduction), PRES:surface, HGT:surface and TMP:2 m, so single fields can be
+downloaded by byte range. There is no GRIB reader in analysis_env (cfgrib/eccodes/pygrib missing).
+
+## Q1 result: AWS GFS GRIB vs Open-Meteo (2026-11-23)
+Script `scripts/gfs_grib_slp_test.py`. Downloaded PRMSL, MSLET, PRES:sfc, HGT:sfc and TMP:2m by byte range for the
+f000 analyses at 00/06/12/18Z, every day of Jan + Jul 2025 (248 files, 932 MB, about 4 min). Stored in
+`/mnt/d/NWP/aws_gfs/grib/`. Outputs `derived/verification/gfs/aws_grib_test/`; figures
+`images/verification/gfs/aws_grib_test/`.
+- **Open-Meteo GFS `pressure_msl` = GFS MSLET** (Eta/Mesinger reduction). Median |diff| 0.03 hPa; 91% within 0.05.
+  It is not PRMSL (median 0.22, max 8.5). Spot-checked independently at KTPH: |om - mslet| 0.02 vs
+  |om - prmsl| 2.64 hPa.
+- **PRMSL (NCEP standard / Shuell) largely removes the summer bias.** July bias vs METAR, MSLET -> PRMSL:
+  TPH -5.98 -> -0.17; WMC -4.93 -> -0.45; RNO -3.56 -> +0.60; LAS -3.25 -> +0.14.
+  - July day-0 gradient bias: LAX-TPH +5.72 -> -0.06; SFO-WMC +5.00 -> +0.50.
+  - July RMSE on the 4 problem pairs: 3.4-6.0 -> 1.1-1.3 hPa.
+- PRMSL is not perfect. January is similar for both (NID, WJF about -1.5). In July PRMSL runs high at DAG (+1.5)
+  and RNO, so LAX-DAG and NID-RNO get about -1.7 hPa gradient bias. A small per-station fit may still help.
+- **GRIB station pressure check:** surface pressure adjusted to station height vs barometers: bias -1.15..+0.46,
+  with no seasonal swing at the high stations. GFS is right at station level; the gap is purely MSLET's reduction.
+- **Answer to Q1:** the bias is in the field Open-Meteo serves (MSLET), not in GFS itself. AWS PRMSL would mostly
+  remove the need for a correction.
+  - Cost for the 2026 holdout: hourly f000-f197 for 4 cycles per day, about tens of GB even for PRMSL only.
+    GFS is 3-hourly after f120.
+  - Caveat: only 2 months of day-0 analyses were tested; lead-time behaviour is untested.
+
+## Q2 result: ECMWF IFS and GEM SLP bias (2026-11-23)
+`nwp_config.py` has new `ecmwf` (ecmwf_ifs025) and `gem` (gem_global) entries. `nwp_pressure_calibration.py` now
+skips step 4 when no points file exists. New script `scripts/nwp_compare_models_slp.py`. About 365 weighted calls.
+Outputs in `derived/verification/{ecmwf,gem}/pressure_calibration/` and `derived/verification/model_comparison/`;
+figures in `images/verification/model_comparison/`.
+- **Answer to Q2: neither has GFS's severe summer bias.**
+  - Day-0 SLP bias at TPH, Jan / Aug: GFS -0.7 / -6.0; ECMWF +0.6 / +0.3; GEM +2.9 / -0.7.
+  - Median high-station bias: GFS -1.71, ECMWF +0.10, GEM +0.29 hPa.
+  - Seasonal swing of bias: GFS 3.45, ECMWF 1.28, GEM 2.41. Diurnal swing: GFS 1.96, ECMWF 1.42, GEM 2.98
+    (GEM TPH 5.4).
+- **GEM runs 2-3 hPa high at the high stations in winter** (Dec-Feb) and has a large diurnal swing. ECMWF is the
+  cleanest. Its worst stations: KNID -1.6..-1.8 in summer; NID-RNO gradient bias -2.1.
+- Open-Meteo `surface_pressure` is derived for all three models. For ECMWF and GEM the derived station pressure has
+  about a 3 hPa seasonal swing at the high stations (GFS 1.3). Their msl is consistent with a cooler-column
+  reduction (closer to METAR) that Open-Meteo's current-temperature formula doesn't invert.
+- **Day-0 gradient RMSE, leave-one-month-out, raw -> corrected (median over pairs, excluding SAC-RDD):**
+  GFS 1.10 -> 0.87, ECMWF 0.84 -> 0.61, GEM 0.92 -> 0.65. 21/21 pairs improve for each model, so the correction
+  is used for both. Uncorrected ECMWF already beats corrected GFS.
+  - LAX-TPH: GFS 4.23 -> 1.85, ECMWF 1.51 -> 1.33, GEM 2.54 -> 1.42.
+  - Median |gradient bias| (annual): GFS 0.69, ECMWF 0.39, GEM 0.41.
+- Config facts for Q3, to verify then: ECMWF runs 00/06/12/18Z, archive from about 2024-02-03. GEM runs only
+  00/12Z (lead_h rule differs), archive from about 2024-02-01.
+
+## Next session: start here
+1. Read this file and the end of `wind_model_plan.md`.
+2. Run the Phase 0 pilot and record the results here. Then go / no-go with the user.
+3. If go: write `nwp_config.py` and the Phase 1 fetcher, then start the multi-day fetch in the background. Meanwhile do Phase 3 (no NWP data needed) and Phase 2 once the 2024-2025 pressure has arrived.
