@@ -67,6 +67,7 @@ DIVERGING = LinearSegmentedColormap.from_list("div", [ORANGE, "#f3f2ee", BLUE])
 
 # ------------------------------------------------------------------ data
 F = pd.read_parquet(f"{VDIR}/forecasts_sustained.parquet")
+F_all = F  # every hour: observations (target, gbt_obs) and event-day selection don't depend on the NWP time step
 if a.valid_hours == "native":
     n0 = len(F)
     F = F[C.is_native(CFG, F.lead_h.to_numpy())].copy()
@@ -247,7 +248,7 @@ dec["median_gradient_rmse_raw"] = gerr[gerr.version == "raw"].groupby("lead_day"
 dec.round(3).to_csv(f"{OUT}/pressure_loss_decomposition.csv")
 
 # ------------------------------------------------------------------ 6. top event days per set
-L0 = F[(F.lead_day == 0) & F.qualifies & F.target_mph.notna()].copy()
+L0 = F_all[(F_all.lead_day == 0) & F_all.qualifies & F_all.target_mph.notna()].copy()
 L0["local_day"] = L0.valid_utc.dt.tz_convert("America/Los_Angeles").dt.date
 ev_days = []
 for sg, x in L0[L0.obs_sign == L0.signed_gradient.str[-1]].groupby("signed_gradient"):
@@ -263,8 +264,10 @@ for sg, x in L0[L0.obs_sign == L0.signed_gradient.str[-1]].groupby("signed_gradi
                             peak_obs_mph=r.target_mph))
 EV = pd.DataFrame(ev_days)
 
-PLOT_LEADS = (1, 3)
-os.makedirs(f"{IMG}/events_d5d7", exist_ok=True)
+MAX_LEAD = int(F.lead_day.max())
+PLOT_LEADS = (1, 3) if MAX_LEAD >= 3 else (0, 1)   # HRRR: days 0-1 only
+if MAX_LEAD >= 7:
+    os.makedirs(f"{IMG}/events_d5d7", exist_ok=True)
 
 
 def plot_events(plot_leads, subdir):
@@ -276,38 +279,44 @@ def plot_events(plot_leads, subdir):
         for ax, (_, e) in zip(axes[:, 0], evs.iterrows()):
             t0, t1 = e.peak_valid_utc - pd.Timedelta(hours=24), e.peak_valid_utc + pd.Timedelta(hours=24)
             x = F[(F.signed_gradient == sg) & F.valid_utc.between(t0, t1)]
+            xo = F_all[(F_all.signed_gradient == sg) & F_all.valid_utc.between(t0, t1) & (F_all.lead_day == k0)]
+            xo = xo.sort_values("valid_utc")
             lt = lambda s: s.dt.tz_convert("America/Los_Angeles").dt.tz_localize(None)
             d1 = x[x.lead_day == k0].sort_values("valid_utc")
-            # shade hours where the first plotted lead's corrected forecast sign does NOT pick this set
+            # shade where the first plotted lead's corrected forecast sign does NOT pick this set; each forecast
+            # time covers +/- half its native step
+            half = (d1.valid_utc.diff().median() if len(d1) > 1 else pd.Timedelta(hours=1)) / 2
             for v in d1.valid_utc[~d1.sel_nwp_corr]:
                 vv = v.tz_convert("America/Los_Angeles").tz_localize(None)
-                ax.axvspan(vv - pd.Timedelta(minutes=30), vv + pd.Timedelta(minutes=30), color="#efeeea", lw=0)
-            ax.plot(lt(d1.valid_utc), d1.target_mph, color=INK, lw=2.2, label="observed (set P75)")
-            ax.plot(lt(d1.valid_utc), d1.gbt_obs, color=AQUA, lw=1.2, ls=":", label="GBT, observed SLP")
+                ax.axvspan(vv - half, vv + half, color="#efeeea", lw=0)
+            ax.plot(lt(xo.valid_utc), xo.target_mph, color=INK, lw=2.2, label="observed (set P75, hourly)")
+            ax.plot(lt(xo.valid_utc), xo.gbt_obs, color=AQUA, lw=1.2, ls=":", label="GBT, observed SLP")
+            mk = dict(marker="o", ms=2.5) if a.valid_hours == "native" else {}
             for k, ls in zip(plot_leads, ("-", "--")):
                 dk = x[x.lead_day == k].sort_values("valid_utc")
-                ax.plot(lt(dk.valid_utc), dk.gbt_nwp_corr, color=BLUE, ls=ls, label=f"GBT, {MODEL_LABEL} day {k}")
-                ax.plot(lt(dk.valid_utc), dk.nwp_p75_rep, color=ORANGE, ls=ls, label=f"raw {MODEL_LABEL} day {k}")
+                ax.plot(lt(dk.valid_utc), dk.gbt_nwp_corr, color=BLUE, ls=ls, label=f"GBT, {MODEL_LABEL} day {k}", **mk)
+                ax.plot(lt(dk.valid_utc), dk.nwp_p75_rep, color=ORANGE, ls=ls, label=f"raw {MODEL_LABEL} day {k}", **mk)
                 s_ = dk[dk.sel_nwp_corr & dk.qualifies]
                 rows.append(dict(signed_gradient=sg, rank=e["rank"], lead_day=k, n=len(s_),
                                  rmse_gbt=np.sqrt(((s_.gbt_nwp_corr - s_.target_mph) ** 2).mean()),
                                  rmse_nwp=np.sqrt(((s_.nwp_p75_rep - s_.target_mph) ** 2).mean()),
-                                 peak_obs=dk.target_mph.max(), peak_gbt=dk.gbt_nwp_corr.max(), peak_nwp=dk.nwp_p75_rep.max(),
-                                 peak_gbt_obs=dk.gbt_obs.max()))
+                                 peak_obs=xo.target_mph.max(), peak_gbt=dk.gbt_nwp_corr.max(), peak_nwp=dk.nwp_p75_rep.max(),
+                                 peak_gbt_obs=xo.gbt_obs.max()))
             ax.set_title(f"#{e['rank']}  {e.local_day}  peak observed {e.peak_obs_mph:.0f} mph", loc="left")
             ax.set_ylabel("mph")
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d %H:%M"))
             ax.set_ylim(bottom=0)
         axes[0, 0].legend(ncol=3, fontsize=8, loc="upper left", bbox_to_anchor=(0, 1.45))
+        step_note = f"; {MODEL_LABEL} forecasts at native output times only" if a.valid_hours == "native" else ""
         fig.suptitle(f"{sg} sustained wind: top 5 event days, lead days {plot_leads[0]} and {plot_leads[1]} "
-                     f"(time PT; grey = day-{k0} forecast sign picks the other set)", x=0.01, ha="left", y=1.0, fontsize=11)
+                     f"(time PT; grey = day-{k0} forecast sign picks the other set{step_note})", x=0.01, ha="left", y=1.0, fontsize=11)
         fig.tight_layout()
         fig.savefig(f"{IMG}/{subdir}/{sg}.png", dpi=110, bbox_inches="tight")
         plt.close(fig)
     return rows
 
 
-win_rows = plot_events(PLOT_LEADS, "events") + plot_events((5, 7), "events_d5d7")
+win_rows = plot_events(PLOT_LEADS, "events") + (plot_events((5, 7), "events_d5d7") if MAX_LEAD >= 7 else [])
 win = pd.DataFrame(win_rows)
 EV.merge(win[win.lead_day == 1][["signed_gradient", "rank", "peak_gbt", "peak_nwp", "peak_gbt_obs"]],
          on=["signed_gradient", "rank"]).round({"peak_obs_mph": 1, "peak_gbt": 1, "peak_nwp": 1, "peak_gbt_obs": 1}).to_csv(f"{OUT}/event_days.csv", index=False)
@@ -327,6 +336,16 @@ ew_tab.round(3).to_csv(f"{OUT}/event_window_scores_by_lead.csv", index=False)
 
 # ------------------------------------------------------------------ figures
 leads = sorted(S.lead_day.unique())
+
+
+def integer_lead_ticks(fig):
+    """Whole-number lead-day ticks on line plots (with 2 leads, as for HRRR, matplotlib would show 0.2 steps)."""
+    from matplotlib.ticker import MaxNLocator
+    for ax in fig.axes:
+        if ax.get_xlabel() == "lead day" and not ax.images:
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+
 STY = {"gbt_nwp_corr": (BLUE, "-", "o"), "gbt_nwp_raw": (BLUE, "--", None), "gbt_obs": (AQUA, ":", None),
        "nwp_p75_rep": (ORANGE, "-", "o"), "nwp_bc": (ORANGE, "--", None), "clim": (MUTED, "-", None)}
 LBL = {**MAIN, "gbt_nwp_raw": "GBT (uncorrected SLP)", "gbt_obs": "GBT (observed SLP)"}
@@ -352,6 +371,7 @@ for i, grp in enumerate(("all", "offshore")):
 for ax in axes[:, 0]:
     ax.legend(fontsize=7.5, loc="lower right")
 fig.tight_layout()
+integer_lead_ticks(fig)
 fig.savefig(f"{IMG}/rmse_by_lead.png", dpi=130)
 plt.close(fig)
 
@@ -413,6 +433,7 @@ axes[1].set(title="Wind RMSE on hours where both signs pick the set", xlabel="le
 axes[1].set_ylim(bottom=0)
 axes[1].legend(fontsize=8)
 fig.tight_layout()
+integer_lead_ticks(fig)
 fig.savefig(f"{IMG}/pressure_error_and_loss.png", dpi=130)
 plt.close(fig)
 
@@ -428,6 +449,7 @@ for ax, T in zip(axes, (15, 20, 30)):
     ax.set_ylim(bottom=0)
 axes[0].legend(fontsize=7.5)
 fig.tight_layout()
+integer_lead_ticks(fig)
 fig.savefig(f"{IMG}/brier_by_lead.png", dpi=130)
 plt.close(fig)
 

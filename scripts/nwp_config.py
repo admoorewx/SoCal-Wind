@@ -37,6 +37,20 @@ MODELS = {
         grid_note="ECMWF IFS 0.25 deg; returned lat/lon is the 0.25 deg cell; surface_pressure is derived by "
                   "Open-Meteo from pressure_msl and the requested elevation (elevation=0 -> equals msl)",
     ),
+    # Added 2026-11-24. Lead definition checked against single runs (KLAX, valid 2026-06-08): day 0 = lead 0 of the
+    # hourly run (an analysis, unlike GFS/ECMWF day 0 = 0-5 h); day 1 = the 00/06/12/18Z 48-h runs, lead 24 + hour
+    # mod 6 (exact match every hour). No day 2. Output is hourly, so every hour is native (no native_steps).
+    # Open-Meteo marks the model discontinued 2026-11-30. Single-runs archive keeps only every 3rd run.
+    "hrrr": dict(
+        open_meteo_model="ncep_hrrr_conus",
+        api="previous_runs",
+        max_lead_day=1,
+        cycle_hours=6,
+        cycle_hours_by_day={0: 1},
+        archive_start="2025-01-01T00:00",  # 2025 available per the Q2 probe; earliest date not checked
+        grid_note="HRRR 3 km CONUS; returned lat/lon is the model cell; pressure_msl is HRRR's own reduction "
+                  "(MSLMA, MAPS method, per the AWS GRIB inventory)",
+    ),
     "gem": dict(
         open_meteo_model="gem_global",
         api="previous_runs",

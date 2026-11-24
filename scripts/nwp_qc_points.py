@@ -81,9 +81,10 @@ w = P.pivot_table(index=["stid", "valid_utc"], columns="lead_day", values=[PV, W
 lc = []
 for var, sts in ((PV, pres_st), (WV, wind_st)):
     x = w[var].loc[sts]
-    for k in range(8):
+    nlead = int(P.lead_day.max()) + 1
+    for k in range(nlead):
         r = dict(var=var, lead_day=k, mean=x[k].mean(), sd=x[k].std())
-        if k < 7:
+        if k < nlead - 1:
             r["frac_identical_to_next"] = float((x[k] == x[k + 1]).mean())
             r["corr_with_next"] = x[k].corr(x[k + 1])
         lc.append(r)

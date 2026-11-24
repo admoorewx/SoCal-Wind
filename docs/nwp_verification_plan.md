@@ -434,7 +434,221 @@ figures in `images/verification/model_comparison/`.
 - Config facts for Q3, to verify then: ECMWF runs 00/06/12/18Z, archive from about 2024-02-03. GEM runs only
   00/12Z (lead_h rule differs), archive from about 2024-02-01.
 
-## Next session: start here
-1. Read this file and the end of `wind_model_plan.md`.
-2. Run the Phase 0 pilot and record the results here. Then go / no-go with the user.
-3. If go: write `nwp_config.py` and the Phase 1 fetcher, then start the multi-day fetch in the background. Meanwhile do Phase 3 (no NWP data needed) and Phase 2 once the 2024-2025 pressure has arrived.
+## AWS guidance inventory and download streamlining (2026-11-23 evening)
+**Buckets checked (anonymous S3 listing, 2026-01-15 files inspected):**
+
+| bucket | model | SLP field(s) | other | archive seen |
+|---|---|---|---|---|
+| noaa-gfs-bdp-pds | GFS 0.25/0.5/1.0 | PRMSL, MSLET, PRES:sfc | hourly to f120, then 3-hourly | 2021+ |
+| noaa-gefs-pds | GEFS (0.5 deg members) | PRMSL, PRES:sfc | ensemble | 2017+ |
+| noaa-hrrr-bdp-pds | HRRR 3 km CONUS | MSLMA (MAPS reduction), PRES:sfc | 0-48 h | 2014+ |
+| hrrrzarr | HRRR in Zarr | (chunked spatial access) | small reads | exists |
+| noaa-nam-pds | NAM | PRMSL, MSLET, PRES:sfc | 0-84 h | 2021+ |
+| noaa-rap-pds | RAP | (not inspected) | | 2021+ |
+| noaa-rrfs-pds | RRFS (rrfs_a) | (not inspected) | daily dirs exist in 2026; operational status unverified | |
+| noaa-nbm-grib2-pds | NBM | none in core | WIND / GUST 10 m (raw-wind benchmark) | 2020+ |
+| ecmwf-forecasts | ECMWF open data IFS (+AIFS) | msl, sp | 10u/10v; 0.25 from 2024-02 (0.4 before) | 2023+ |
+| noaa-urma-pds / noaa-rtma-pds | analyses | | gridded obs analyses, not forecasts | |
+
+GEM is not on AWS. noaa-href-pds does not exist. ECMWF open data is probably Open-Meteo's own ECMWF source.
+
+**Message sizes (GFS PRMSL, one field):** 1.00 MB at 0.25 deg, 0.30 MB at 0.5, 0.08 MB at 1.0. GRIB messages are
+global, so a byte range can't subset space. Volume scales with the number of (cycle, forecast-hour) messages, not
+with the number of stations.
+
+**Gradient-threshold sampling (user idea; tested on 2026 obs gradients):**
+- The union over pairs keeps almost every hour: |grad| >= 3: 99.1%; >= 4: 94.7%; >= 5: 84.4%; >= 6: 66.6%.
+  SAN-IPL and SAN-LAS are >= 3 hPa about 70% of the time. Per-pair selection saves nothing, because each message
+  covers all stations.
+- SoCal offshore only (any LAX-*/SAN-* pair <= -3 hPa): 30.5% of hours, a 3x saving.
+- Selecting on the OBSERVED gradient conditions on the outcome side. Own-pair |grad_obs| >= 3 keeps 35% of scoring
+  rows, drops 18% of the >= 30 mph hours, and inflates RMSE (GBT 3.66 / NWP 6.30 vs all-rows 3.13 / 4.81 at day 1).
+  "obs OR Open-Meteo forecast >= 3" reduces the drop (87% of >= 30 mph hours kept).
+
+**Systematic time subsampling (unbiased) — GFS PRMSL 0.25, Jan-Oct 2026, 4 cycles/day:**
+
+| valid times | messages | 0.25 deg | 0.5 deg |
+|---|---|---|---|
+| hourly (Open-Meteo-equivalent; days 5-7 need interpolation) | ~58,400 | ~58 GB | ~17 GB |
+| 3-hourly | ~19,500 | ~19.5 GB | ~5.8 GB |
+| 6-hourly (00/06/12/18Z), exact 24N-h leads, no interpolation | ~9,700 | ~9.7 GB | ~2.9 GB |
+| 6-hourly + SoCal-offshore filter | ~3,000 | ~3 GB | ~0.9 GB |
+
+The Q1 download speed was about 3.9 MB/s, so 6-hourly at 0.25 deg takes about 45 min. Open-Meteo previous_dayN at
+00/06/12/18Z also has lead exactly 24N h, so the two are directly comparable.
+
+**Resolution test (0.5 vs 0.25 deg PRMSL, nearest point, Jan+Jul 2025, 248 analyses, 70 MB):**
+- Median |diff| 0.14 hPa, but RNO is +1.52 +/- 1.40 and PMD 0.91 SD.
+- Gradient RMS difference: SAC-RNO 2.07, NID-RNO 1.66, LAX-PMD 0.98. PRMSL in complex terrain varies over short
+  distances, so keep 0.25 deg.
+
+## AWS PRMSL as GBT input, 6-hourly 2026 (2026-11-23 night)
+`scripts/gfs_aws_prmsl_fetch.py`: 9,728 PRMSL messages (0.25 deg, valid 00/06/12/18Z, cycle V-24N, f=24N), 9.3 GB in
+22 min at 6.9 MB/s, 0 failures. Raw data in `/mnt/d/NWP/aws_gfs/prmsl/`; points in
+`derived/verification/gfs/aws_prmsl/points_20260101_20261031.parquet`.
+`scripts/nwp_prmsl_test.py`: the feature builder reproduces the stored gbt_obs exactly. Outputs in
+`derived/verification/gfs/aws_prmsl/`; figure `images/verification/gfs/aws_prmsl/prmsl_vs_openmeteo.png`.
+- **Gradient RMSE vs METAR (median over pairs), days 0 / 1 / 3 / 7:**
+  - Open-Meteo corrected 0.83 / 1.03 / 1.37 / 2.07
+  - PRMSL raw 1.03 / 1.18 / 1.46 / 2.27
+  - PRMSL + Jan/Jul-2025 constant offset 0.87 / 1.13 / 1.34 / 2.22
+  - Open-Meteo raw 1.11 / 1.33 / 1.70 / 2.46
+  PRMSL fixes LAX-TPH / SFO-WMC / SAC-RNO (day 1 LAX-TPH 1.68 vs 2.06 corrected), but adds LAX-DAG / NID-RNO errors.
+- **Wind RMSE, all sets, days 0 / 3 / 7** (each on its own sign rows):
+  - GBT-PRMSL 3.45 / 3.72 / 5.17; GBT-PRMSL+offset 3.11 / 3.62 / 5.11
+  - GBT-Open-Meteo corrected 2.99 / 3.50 / 4.95; GBT-Open-Meteo raw 4.10 / 4.42 / 5.63
+  - Raw GFS wind 4.57 / 5.00 / 5.89
+- **Head-to-head on common rows** (positive = Open-Meteo corrected better):
+  - PRMSL raw: +0.44 (day 0) to +0.18..0.25 mph (days 3-7), all CIs above 0.
+  - PRMSL + offset: +0.12..0.18 mph, all CIs above 0.
+  - Offshore: PRMSL raw +0.86 at day 0, not significant at days 2-5. PRMSL + offset +0.23..0.48, all significant.
+- **Strong winds, lead 1, >= 30 mph:** RMSE corrected 7.47, PRMSL 7.79, PRMSL+offset 8.24. PRMSL raw has the
+  smallest negative bias (-5.97 vs -6.39). In calm hours PRMSL runs more positive (+1.93 vs +1.28).
+- **Reading:** AWS PRMSL removes the large MSLET summer bias, and raw PRMSL beats raw Open-Meteo. But raw PRMSL is
+  NOT as good an input as Open-Meteo + the 2025 harmonic correction: PRMSL keeps smaller seasonal/diurnal station
+  biases that the full correction removes and a constant offset doesn't. So the correction step still pays off;
+  switching to AWS doesn't remove it.
+  - Open question: would PRMSL + the same harmonic correction (fitted on 2025 6-hourly PRMSL, about 1,460
+    messages / 1.5 GB) beat Open-Meteo + correction?
+
+## Next session: start here (updated 2026-11-23 night)
+- **Decision (user, 2026-11-23):** keep Open-Meteo + the per-model 2025 harmonic SLP correction as the pressure
+  source. AWS PRMSL was tested and not adopted. `gfs_aws_prmsl_fetch.py` and `nwp_prmsl_test.py` stay uncommitted
+  by the user's choice.
+- **Q3 (next):** run the full pipeline for ECMWF IFS first (coefficients already fitted), then HRRR (Open-Meteo
+  marks it discontinued 2026-11-30; days 0-1 only), then GEM (00/12Z cycles only, so the lead_h rule differs).
+  NBM serves as a wind-only benchmark.
+  - Per model: verify the lead definition (single runs), fetch 2026 winds and pressure (about 8k calls, one day of
+    quota), run QC, `nwp_run_gbt.py --model X`, then `nwp_verify.py --model X`.
+  - Then compare across models.
+- The plan doc changes since commit 543b577 are uncommitted.
+
+## Q3 step 1: ECMWF IFS lead definition (2026-11-23)
+Scratch check (34 weighted calls): KLAX, `previous_day0-7` for valid 2026-06-08, against all 32 single runs
+2026-06-01 00Z to 06-08 18Z.
+- **Run horizons:** 00/12Z runs reach 239 h; 06/18Z runs stop at 146 h.
+- **Days 0-5:** fed by the latest 00/06/12/18Z run at or before valid - 24N h, so lead = 24N + (hour mod 6), as for GFS.
+- **Days 6-7:** fed only by 00/12Z runs, so lead = 24N + (hour mod 12): day 6 = 144-155 h, day 7 = 168-179 h.
+- **Native vs interpolated hours:** at 3-hourly valid times (6-hourly beyond 144 h) previous-runs equals the single
+  run exactly. Other hours are Open-Meteo interpolations of the stitched series. They differ from the single run by
+  up to 0.6 hPa / 0.7 m/s at days 0-6, and 2.1 hPa / 0.7 m/s at day 7. Neither within-run nor across-run linear
+  interpolation reproduces them exactly. This is a data property, not a lead error.
+  (GFS is natively hourly to 120 h, so it doesn't have this.)
+- `nwp_config.py`: `ecmwf.cycle_hours_by_day = {6: 12, 7: 12}` plus a `cycle_hours_for()` helper, used by the
+  fetcher for `lead_h` (metadata only; no model input).
+
+## Q3 step 2: ECMWF test fetch + native-hours scoring decision (2026-11-23)
+- **Test fetch (KACV, both variables, 2026-01-01..10-31):** cost 34.7 (set-only stations ~17.4), so the full fetch is
+  about 7.8k weighted calls, as for GFS. Archive gap: `pressure_msl_previous_day5` and `_day6` are missing 2026-04-17
+  15Z to 04-22 23Z (129 h each). Wind is complete.
+- **Decision (user):** score only the models' **native output times**, not Open-Meteo's hourly interpolations, which
+  a reviewer would question. The GFS/ECMWF difference in time resolution is discussed explicitly in the write-up.
+  - `nwp_config.py`: `native_steps` per model plus `is_native(cfg, lead_h)`.
+    GFS: hourly to 120 h, 3-hourly beyond (days 0-4 all hours; days 5-7 at 00/03/../21Z).
+    ECMWF: 3-hourly to 144 h, 6-hourly beyond (days 0-5 at 00/03/../21Z; days 6-7 at 00/06/12/18Z).
+  - `nwp_verify.py --valid-hours native` (default) filters the forecast rows and the pressure-error section, writing
+    to `scores_native/` and `images/verification/<model>/native/`. `--valid-hours all` reproduces the earlier
+    behaviour in `scores/`.
+  - The existing GFS results (`scores/`, all hours) include interpolated hours at days 5-7. Rerun GFS with the
+    native default (no calls) before the cross-model comparison. The like-for-like comparison uses the common times,
+    i.e. ECMWF's native set, which is a subset of GFS's.
+
+## Q3 step 3: ECMWF fetch and data QC, 2026 (2026-11-24)
+- **Fetch:** 437/437 stations ok, 7,765 weighted calls, 1 h 47 min, 1 SSL timeout (recovered on retry). Points table
+  25.5 M rows (50 MB). QC outputs in `derived/verification/ecmwf/qc/`.
+- **Completeness:** wind is complete. Pressure is missing only for days 5-6, 2026-04-17 15Z to 04-22, at all 22
+  gradient stations (5,676 values, an archive gap).
+- **Values:** pressure 983.8-1046.3 hPa; wind 0-21.8 m/s; longest identical run 10 h. Leads are distinct (0 hours
+  with day 0 = day 1 at >= 90% of stations). Wind climatology is flat across leads; pressure drifts about -0.7 hPa by
+  day 7 (GFS about -1).
+- **Grid cells:** 0.8-28.1 km from the station (median 10.2; 54 beyond 15 km, against a GFS max of 13.9). This is the
+  0.25 deg grid with `cell_selection=land`. |dz| > 300 m only at WAPC1F1 (a metadata error, as for GFS) and WMSC1.
+- **Day-0 pressure vs METAR SLP:** no seasonal bias. The pooled monthly bias is -0.12..+0.13 hPa (GFS TPH alone
+  -1.6..-6.6). SD 0.25-0.9 at low stations and 1.2-1.4 at TPH / WMC / LMT / RNO. The 2025 harmonic correction is
+  still applied (Q2 CV: gradient RMSE 0.84 -> 0.61).
+- **Day-0 wind vs matched max sustained:** median r 0.65 (GFS 0.62); 5-95% 0.29-0.82; 8 stations r < 0.2
+  (KSXT again -0.24, Oregon valley RAWS).
+  **NWP/obs mean ratio 0.75 (GFS 0.94): ECMWF 10 m wind runs low.** That is a bias the raw-NWP baseline carries;
+  the oracle bias-corrected baseline (`nwp_bc`) removes it.
+
+## Q3 step 4: ECMWF GBT + verification, native times (2026-11-24)
+`nwp_run_gbt.py --model ecmwf` (1.48 M forecast rows); `nwp_verify.py --model ecmwf` (native: 432k rows kept).
+Outputs in `derived/verification/ecmwf/scores_native/`; figures in `images/verification/ecmwf/native/`.
+- **RMSE (mph), all sets, days 0 / 1 / 3 / 5 / 7:**
+  - GBT-corrected 2.75 / 2.83 / 3.12 / 3.74 / 4.65
+  - oracle bias-corrected ECMWF 3.08 / 3.19 / 3.45 / 3.95 / 4.62
+  - raw ECMWF 5.76 / 5.70 / 5.80 / 6.13 / 6.40 (bias about -4.1 mph: ECMWF 10 m wind runs low)
+  - gbt_obs (perfect pressure) 2.72
+- **Verdict:** GBT is significantly better than raw ECMWF at all 8 leads, all sets and offshore. Against the oracle
+  bias-corrected ECMWF it is significantly better at days 0-5 (all sets) and days 0-6 (offshore). Day 6 all
+  (-0.08, CI -0.22..+0.05) and day 7 (+0.03 all, -0.07 offshore) are ties.
+  GFS (native) beat its oracle at all 8 leads (all sets) and days 0-6 (offshore), so the GBT margin over the
+  NWP itself is smaller for ECMWF, mostly because bias-corrected ECMWF wind is better than bias-corrected GFS.
+- **>= 30 mph, lead 1:** GBT bias -5.4, RMSE 7.10; oracle bias-corrected -10.6 / 11.5; raw -18.4 / 19.0.
+
+### GFS vs ECMWF head-to-head (common rows)
+`scripts/nwp_compare_gfs_ecmwf.py` -> `derived/verification/model_comparison/gfs_vs_ecmwf_common_native.csv`.
+Rows: ECMWF native times (days 0-5 3-hourly, days 6-7 6-hourly), qualifying, selected by BOTH models' corrected sign
+(22-26k rows per lead). The oracle bias correction was refitted on these rows. Paired day-block bootstrap (1,000).
+- **GBT-ECMWF minus GBT-GFS RMSE, all sets:** -0.24 (day 0), -0.30, -0.38, -0.41, -0.38, -0.45, -0.30, -0.46 (day 7);
+  every CI is below 0. Offshore: -0.10 (day 0, n.s.), -0.38..-0.67 at days 1-5, -0.33 (day 6, n.s.), -0.76 (day 7).
+- **Raw wind ranks the other way:** raw GFS 4.76-6.22 beats raw ECMWF 5.88-6.80 (ECMWF low bias). Bias-corrected,
+  ECMWF is better (3.09-4.65 vs 3.46-5.32).
+- **>= 30 mph (about 145 rows per lead, no CI):** GBT-ECMWF 7.1-10.9 vs GBT-GFS 7.9-13.1.
+- **Reading:** ECMWF pressure makes the better GBT input at every lead, consistent with its smaller gradient errors
+  (Q2). The added value of the GBT over the NWP's own wind is clear for both models through day 5; at days 6-7 it is
+  a tie against bias-corrected ECMWF.
+
+## Q3 HRRR: lead definition, calibration, fetch (2026-11-24)
+- **Lead check** (15 weighted calls; KLAX, valid 2026-06-08, `ncep_hrrr_conus`):
+  - `previous_day2` is empty.
+  - **Day 1** = the 00/06/12/18Z 48-h runs, lead 24 + (hour mod 6). It matches the single run exactly at every hour,
+    so output is natively hourly.
+  - **Day 0** = lead 0 of each hourly run (an analysis). GFS/ECMWF day 0 is 0-5 h, so day 1 is the HRRR comparison
+    that counts.
+  - The single-runs archive keeps only every 3rd run (00/03/../21Z).
+  - `nwp_config.py` entry `hrrr`: `cycle_hours_by_day={0: 1}`, `max_lead_day=1`, no `native_steps` (all hours native).
+- **2025 SLP calibration** (172 calls): the correction is USED (21/21 pairs improve in LOMO CV). Median day-0
+  gradient RMSE 1.23 -> 1.03, against GFS 0.87 and ECMWF 0.61 after correction.
+  - HRRR `pressure_msl` (MSLMA) is noisy at the high stations: SLP SD 3.4-3.7 hPa raw, 2.5-2.7 corrected at TPH / WMC /
+    RNO / LMT.
+  - Corrected gradient RMSE: LAX-TPH 2.36, SFO-WMC 2.26, SAC-RNO 2.32, against GFS 1.85 / 1.76 / 1.57.
+  - Expect HRRR-driven GBT to suffer on the pairs with high stations.
+- **Fetch:** 437/437 ok, 1,941 weighted calls, 35 min, no rate limit hit (about 7.1k calls on 2026-11-24 UTC).
+  Points 6.4 M rows. Archive gap: `pressure_msl_previous_day1` is missing 2026-04-04 19Z to 04-10 17Z (143 h) at
+  all 22 gradient stations.
+- **QC** (`nwp_qc_points.py` now handles fewer than 8 leads):
+  - Grid cells 0-5.6 km from the station (median 1.3).
+  - Day-0 wind vs obs: median r 0.73 (GFS 0.62, ECMWF 0.65); NWP/obs ratio 1.11. Day-1 wind is about 9% windier than
+    day 0.
+  - Day-0 SLP vs METAR: SD 2.4-2.7 hPa at TPH / WMC / RNO / LMT; bias -1.4..-2.8 at the high stations.
+- **Verification** (`nwp_verify.py` now adapts the event-plot leads: days 0/1 for HRRR, no d5d7). All hours are native.
+  - RMSE, all sets, days 0 / 1:
+    - GBT-HRRR-corrected 3.09 / 3.33
+    - raw HRRR 2.74 / 3.16
+    - bias-corrected HRRR 2.35 / 2.87
+    - gbt_obs 2.71
+  - **Raw HRRR beats the GBT driven by HRRR pressure at both days** (significant for all sets; ties offshore).
+    HRRR pressure is the worst GBT input of the three models.
+- **Raw HRRR vs the GBTs, common rows** (`scripts/nwp_compare_hrrr.py` ->
+  `model_comparison/hrrr_vs_gbt_common_native.csv`; 3-hourly times, selected by all three corrected signs,
+  days 0-1). GBT-ECMWF minus HRRR RMSE:
+  - Day 1, all sets: vs raw -0.32 [-0.42, -0.23]; vs bias-corrected -0.04 [-0.13, +0.04] (tie).
+  - Day 1, offshore: vs raw -0.52 [-0.74, -0.29]; vs bias-corrected -0.31 [-0.49, -0.11].
+  - Day 0 (HRRR = analysis), all sets: vs raw -0.01 (tie); vs bias-corrected +0.40 (HRRR better).
+    Offshore: vs raw -0.34 (GBT better); vs bias-corrected +0.13 (n.s.).
+  - **>= 30 mph obs (about 145 rows):** raw HRRR 6.4 vs GBT-ECMWF 7.1-7.3 RMSE; bias -3.5 vs -5.4.
+    20-30 mph, day 1: GBT-ECMWF 3.89 vs raw HRRR 4.04.
+  - **Reading:** at day 1 the ECMWF-driven GBT beats raw HRRR and ties bias-corrected HRRR overall, and beats both
+    offshore. HRRR's 3 km wind handles the strongest winds better (smaller low bias), which the gradient-only GBT
+    can't match. HRRR day 0 is an analysis, so it isn't a fair forecast comparison.
+- **HRRR figures** in `images/verification/hrrr/native/`: the standard set plus `events/` at days 0/1.
+  `nwp_verify.py` now forces integer lead-day ticks on its line plots (2-lead axes showed 0.2 steps). GFS and ECMWF
+  were rerun too; their numbers are unchanged.
+- **Side-by-side event plots, GBT-ECMWF vs raw HRRR** (`scripts/nwp_compare_hrrr_events.py` ->
+  `images/verification/model_comparison/hrrr_vs_gbt_ecmwf_events/`, window table
+  `model_comparison/hrrr_vs_gbt_ecmwf_event_windows.csv`): the same top-5 event days per set, days 0/1, all hours
+  (no sign selection).
+  - Median event-window RMSE on common 3-hourly times: day 1 GBT-ECMWF 3.19 vs raw HRRR 3.41 (GBT better in
+    79/130 windows); day 0 3.04 vs 2.97 (65/130).
+  - Raw HRRR catches some short peaks that the GBT smooths over (e.g. SFO-WMC+ Feb 24, May 3).
