@@ -16,16 +16,23 @@ MODELS = {
         api="previous_runs",
         max_lead_day=7,
         cycle_hours=6,                  # 00/06/12/18Z; lead_h = 24*N + (valid hour mod 6)
+        native_steps=((120, 1), (None, 3)),  # GFS output: hourly to 120 h, 3-hourly beyond
         archive_start="2024-01-18T12:00",
         grid_note="returned lat/lon/elevation is the 0.13 deg wind cell; pressure_msl comes from the "
                   "nearest 0.25 deg cell, which the response does not report",
     ),
-    # Added 2026-11-23 (Q2). Lead definition and cycle_hours: verify in Q3 (single-runs check as for gfs).
+    # Added 2026-11-23 (Q2). Lead definition checked against single runs 2026-11-23 (KLAX, valid 2026-06-08):
+    # days 0-5 use the latest 00/06/12/18Z run (lead 24N + hour mod 6); days 6-7 use only 00/12Z runs, because the
+    # 06/18Z runs stop at 146 h (lead 24N + hour mod 12). Native output is 3-hourly to 144 h and 6-hourly beyond;
+    # off-native hours are Open-Meteo interpolations of the stitched series (differ from the single run by <= 0.6 hPa
+    # / 0.7 m/s at days 0-6, up to 2.1 hPa at day 7).
     "ecmwf": dict(
         open_meteo_model="ecmwf_ifs025",
         api="previous_runs",
         max_lead_day=7,
-        cycle_hours=6,                  # 00/06/12/18Z runs exist in single-runs (checked 2026-06-01); verify in Q3
+        cycle_hours=6,
+        cycle_hours_by_day={6: 12, 7: 12},
+        native_steps=((144, 3), (None, 6)),  # ECMWF open data: 3-hourly to 144 h, 6-hourly beyond
         archive_start="2024-02-03T00:00",  # previous_day1 empty 2024-02-01, present 2024-03-01; docs say 2024-02-03
         grid_note="ECMWF IFS 0.25 deg; returned lat/lon is the 0.25 deg cell; surface_pressure is derived by "
                   "Open-Meteo from pressure_msl and the requested elevation (elevation=0 -> equals msl)",
@@ -63,6 +70,28 @@ def slp_correction_design(valid_utc):
                             np.cos(hr), np.sin(hr), np.cos(2 * hr), np.sin(2 * hr),
                             np.cos(doy) * np.cos(hr), np.cos(doy) * np.sin(hr),
                             np.sin(doy) * np.cos(hr), np.sin(doy) * np.sin(hr)])
+
+
+def cycle_hours_for(cfg, lead_day):
+    """Spacing (h) of the runs that feed previous_day<lead_day> for a model config."""
+    return cfg.get("cycle_hours_by_day", {}).get(lead_day, cfg["cycle_hours"])
+
+
+def is_native(cfg, lead_h):
+    """True where the forecast lead is an output step of the model itself (not an Open-Meteo interpolation).
+    native_steps: ((max_lead_h, step_h), ..., (None, step_h)), checked in order. Models without the key: all True."""
+    import numpy as np
+    lead_h = np.asarray(lead_h)
+    steps = cfg.get("native_steps")
+    if not steps:
+        return np.ones(lead_h.shape, bool)
+    out = np.zeros(lead_h.shape, bool)
+    done = np.zeros(lead_h.shape, bool)
+    for max_h, step in steps:
+        here = ~done & (lead_h <= max_h if max_h is not None else True)
+        out |= here & (lead_h % step == 0)
+        done |= here
+    return out
 
 
 def lead_hours(valid_hour, lead_day, cycle_hours=6):

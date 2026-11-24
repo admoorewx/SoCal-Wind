@@ -13,7 +13,9 @@ Outputs -> derived/verification/<model>/scores/, figures -> images/verification/
   scores_by_speed_bin.csv, scores_by_sign.csv, scores_by_season.csv, scores_by_set.csv, events_brier_csi.csv,
   csi_cutoffs_oof.csv, pressure_station_errors.csv, pressure_gradient_errors.csv, pressure_loss_decomposition.csv,
   event_days.csv, event_window_scores.csv
-Usage: python nwp_verify.py --model gfs
+Valid hours: by default only the model's native output steps are scored (nwp_config native_steps); Open-Meteo
+interpolates the hours between them. --valid-hours all scores every hour (outputs in scores/ instead of scores_native/).
+Usage: python nwp_verify.py --model gfs [--valid-hours native|all]
 """
 import argparse, glob, json, os, warnings
 
@@ -36,10 +38,14 @@ ap.add_argument("--model", default="gfs")
 ap.add_argument("--points-tag", default="20260101_20261031")
 ap.add_argument("--calib", default="coefficients_2025.json")
 ap.add_argument("--n-boot", type=int, default=1000)
+ap.add_argument("--valid-hours", choices=["native", "all"], default="native",
+                help="native: score only valid times at the model's own output steps (C.is_native); "
+                     "all: every hour, including Open-Meteo interpolations")
 a = ap.parse_args()
+CFG = C.MODELS[a.model]
 VDIR = f"{DER}/verification/{a.model}"
-OUT = f"{VDIR}/scores"
-IMG = f"{ROOT}/images/verification/{a.model}"
+OUT = f"{VDIR}/scores" + ("_native" if a.valid_hours == "native" else "")
+IMG = f"{ROOT}/images/verification/{a.model}" + ("/native" if a.valid_hours == "native" else "")
 for d in (OUT, IMG, f"{IMG}/events"):
     os.makedirs(d, exist_ok=True)
 pd.set_option("display.width", 220)
@@ -61,6 +67,10 @@ DIVERGING = LinearSegmentedColormap.from_list("div", [ORANGE, "#f3f2ee", BLUE])
 
 # ------------------------------------------------------------------ data
 F = pd.read_parquet(f"{VDIR}/forecasts_sustained.parquet")
+if a.valid_hours == "native":
+    n0 = len(F)
+    F = F[C.is_native(CFG, F.lead_h.to_numpy())].copy()
+    print(f"native valid times only: kept {len(F):,} of {n0:,} forecast rows")
 tr = pd.read_parquet(f"{DER}/models/targets/sustained_train.parquet", columns=["signed_gradient", "target_mph", "qualifies"])
 clim = tr[tr.qualifies].groupby("signed_gradient").target_mph.mean()
 F["clim"] = F.signed_gradient.map(clim)
@@ -191,7 +201,9 @@ ev.round(4).to_csv(f"{OUT}/events_brier_csi.csv", index=False)
 pairs = gp.load_pairs(gp.DEFAULT_GRADIENTS)
 pres_st = sorted({s for p in pairs.values() for s in p})
 P = pd.read_parquet(f"{C.OPEN_METEO_ROOT}/points/{a.model}/points_{a.points_tag}.parquet",
-                    columns=["valid_utc", "stid", "lead_day", "pressure_msl_hpa"], filters=[("stid", "in", pres_st)])
+                    columns=["valid_utc", "stid", "lead_day", "lead_h", "pressure_msl_hpa"], filters=[("stid", "in", pres_st)])
+if a.valid_hours == "native":
+    P = P[C.is_native(CFG, P.lead_h.to_numpy())]
 P["valid_utc"] = P.valid_utc.astype("datetime64[us, UTC]")
 coef = json.load(open(f"{VDIR}/pressure_calibration/{a.calib}"))["coefficients"]
 P["p_corr"] = np.nan

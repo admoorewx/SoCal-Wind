@@ -145,7 +145,7 @@ def build(args, cfg, stations, raw_dir, pts_dir, tag):
         n = len(valid)
         for k in days:
             out = dict(valid_utc=valid, stid=np.full(n, r.stid), lead_day=np.full(n, k, dtype="int8"),
-                       lead_h=np.asarray(C.lead_hours(valid.hour.values, k, cfg["cycle_hours"]), dtype="int16"))
+                       lead_h=np.asarray(C.lead_hours(valid.hour.values, k, C.cycle_hours_for(cfg, k)), dtype="int16"))
             for v, colname in C.VARIABLES.items():
                 c = C.column_name(v, k)
                 out[colname] = (np.array([np.nan if x is None else x for x in h[c]], dtype="float32")
