@@ -51,11 +51,17 @@ MODELS = {
         grid_note="HRRR 3 km CONUS; returned lat/lon is the model cell; pressure_msl is HRRR's own reduction "
                   "(MSLMA, MAPS method, per the AWS GRIB inventory)",
     ),
+    # Lead definition checked 2026-11-24 against single runs (KLAX, valid 2026-10-28, 17 runs at full 240 h horizon;
+    # the single-runs archive is empty for June/Aug 2026): every day 0-7 comes from the 00/12Z runs, lead 24N + hour
+    # mod 12, exact match at every hour (wind within 0.05 m/s rounding). No 06/18Z runs exist. Native output is hourly
+    # to 84 h, 3-hourly beyond; off-native hours are Open-Meteo Hermite interpolations (residual <= 0.05 after 84 h).
+    # So days 0-3 are native at all hours, days 4-7 at 00/03/../21Z.
     "gem": dict(
         open_meteo_model="gem_global",
         api="previous_runs",
         max_lead_day=7,
-        cycle_hours=12,                 # only 00/12Z runs in single-runs (06Z/18Z not available); verify in Q3
+        cycle_hours=12,                 # 00/12Z runs only; lead_h = 24*N + (valid hour mod 12)
+        native_steps=((84, 1), (None, 3)),  # GEM GDPS: hourly to 84 h, 3-hourly beyond
         archive_start="2024-02-01T00:00",  # previous_day1 empty 2024-01-10, present 2024-02-01 (approximate)
         grid_note="GEM GDPS 15 km (cmc_gem_gdps_15km); returned lat/lon is the model cell; surface_pressure is "
                   "derived by Open-Meteo from pressure_msl and the requested elevation (elevation=0 -> equals msl)",

@@ -652,3 +652,75 @@ Rows: ECMWF native times (days 0-5 3-hourly, days 6-7 6-hourly), qualifying, sel
   - Median event-window RMSE on common 3-hourly times: day 1 GBT-ECMWF 3.19 vs raw HRRR 3.41 (GBT better in
     79/130 windows); day 0 3.04 vs 2.97 (65/130).
   - Raw HRRR catches some short peaks that the GBT smooths over (e.g. SFO-WMC+ Feb 24, May 3).
+
+## Q3 GEM: lead definition and native step (2026-11-24)
+Scratch check, about 75 weighted calls. KLAX; previous_day0-7 compared against single runs.
+- **Single-runs archive:** GEM runs for 2026-05-31..06-08 and 2026-08-01 return all-null values, and 2026-03-01 is
+  rejected. Runs from 2026-10-20 12Z on are complete, so the check uses valid 2026-10-28 (17 runs, `forecast_days=11`;
+  the default response is cut at 168 h).
+- **Runs:** only 00/12Z runs exist; 06/18Z return "run not available". The horizon is 240 h.
+- **Lead rule:** every day 0-7 is fed by the latest 00/12Z run at or before valid - 24N h, so lead = 24N + (hour mod 12).
+  Previous-runs equals that single run at every hour: pressure exactly, wind within 0.05 m/s (rounding).
+  - Caveat for the write-up: at the same lead day GEM is up to 6 h older than GFS/ECMWF days 0-5 (24N + 0-11 h vs
+    24N + 0-5 h), as ECMWF is at days 6-7. Day 0 is a 0-11 h forecast.
+- **Native step:** hourly to 84 h, 3-hourly beyond. Beyond 84 h the off-3-hourly hours equal a Catmull-Rom Hermite
+  interpolation of the 3-hourly values to within 0.05 (rounding). Up to 83 h they differ by up to 0.7 hPa / 2.2 m/s,
+  so they are real model output.
+  - `nwp_config.py` gem: `cycle_hours=12`, `native_steps=((84, 1), (None, 3))`. Days 0-3 (lead <= 83 h) are native
+    at all hours, days 4-7 at 00/03/../21Z. ECMWF's native set is a subset, so the common-row comparisons are
+    unchanged.
+- **Previous-runs completeness, KLAX 2026** (this doubled as the test fetch; cost 34.7, the same as ECMWF):
+  - Days 0-1 complete.
+  - Gaps are in June (16% missing at days 3-7; wind days 2 and 5 37%) and April (pressure day 5, 5%).
+  - Overall missing per column is 0-3.6%.
+- **Fetch (2026-11-24/25):** 437/437 stations ok, 7,765 weighted calls, 2 h 3 min, 1 read timeout (recovered on
+  retry). Points table 25.5 M rows (36 MB).
+- **QC** (`derived/verification/gem/qc/`):
+  - Missing pressure is 13.7k values (0.6%), in the June/April gaps.
+  - Grid cells are 0-23 km from the station (median 6.3).
+  - Day-0 SLP vs METAR: median |bias| 0.29 hPa, median SD 0.54. For comparison, ECMWF is 0.27 / 0.43 and GFS
+    0.77 / 0.84. SD is 1.8-2.5 hPa at RNO / WMC / TPH.
+  - Day-0 wind vs obs: median r 0.62 (GFS 0.62, ECMWF 0.65, HRRR 0.73). Median NWP/obs ratio 0.65, the lowest of
+    the four models (ECMWF 0.75, GFS 0.94, HRRR 1.11), so raw GEM 10 m wind is strongly low-biased.
+- **GBT + verification, native times** (`nwp_run_gbt.py` / `nwp_verify.py --model gem`). 987,588 of 1,480,832 rows
+  are native. The verdict passes vs raw at 8/8 leads; vs bias-corrected it is significant at 5/8 leads (all sets)
+  and 6/8 (offshore).
+  - RMSE, all sets, days 0 / 1 / 3 / 5 / 7:
+    - GBT-GEM-corrected 2.80 / 3.00 / 3.42 / 4.14 / 4.93
+    - bias-corrected GEM 3.44 / 3.55 / 3.80 / 4.35 / 4.90
+    - raw GEM 6.72 / 6.73 / 6.84 / 7.12 / 7.27 (bias about -5 mph)
+    - gbt_obs 2.71
+  - Offshore: GBT-GEM bias rises from 0.0 at day 0 to +1.0..+1.4 mph at days 3-7. ECMWF's is +0.2.
+- **GEM vs GFS vs ECMWF, common rows** (`scripts/nwp_compare_gem.py` ->
+  `model_comparison/gem_vs_gfs_ecmwf_common_native.csv`; native to all three, selected by all three corrected signs,
+  which leaves ECMWF's native set). RMSE, all sets, days 0 / 1 / 3 / 5 / 7:
+  - GBT-ECMWF 2.80 / 2.88 / 3.20 / 3.79 / 4.74
+  - GBT-GEM 2.84 / 3.06 / 3.51 / 4.24 / 4.95
+  - GBT-GFS 3.04 / 3.19 / 3.64 / 4.29 / 5.11
+  - **GBT-GEM minus GBT-ECMWF:** +0.05 [+0.01, +0.08] at day 0, growing to +0.45 [+0.30, +0.62] at day 5 and
+    +0.21 [+0.00, +0.45] at day 7, so ECMWF is better at every lead.
+  - **GBT-GEM minus GBT-GFS:** -0.20 [-0.27, -0.14] at day 0, -0.12 at day 1, -0.15 at day 2 (all significant). Days
+    3-7 are ties.
+  - **GBT-GEM minus bias-corrected GEM:** -0.61 at day 0 to -0.16 at day 5 (significant through day 4). Days 5-7
+    are ties. Offshore: -1.50 at day 0 to -0.53 at day 5 (significant), days 6-7 ties.
+  - **>= 30 mph obs:** GBT-GEM 6.9-7.6 RMSE at days 0-3 (GBT-ECMWF 7.0-7.5, GBT-GFS 7.9-9.2). Raw GEM is 21+
+    (bias -21 mph).
+  - **Reading:** the GBT ranking by driving model is ECMWF > GEM > GFS at days 0-2, and ECMWF > GEM ≈ GFS from day 3.
+    GBT post-processing gives GEM the largest gain over its raw wind of any model (-4.2 mph at day 0), because raw
+    GEM wind is the most low-biased. Against the oracle bias-corrected GEM, the gain is similar to ECMWF's: it holds
+    through day 4 and ties at days 6-7.
+- **Next:** NBM as a wind-only benchmark (no pressure; compare its raw wind against the GBTs on common rows).
+- **GEM figures (2026-11-25):**
+  - `images/verification/gem/native/`: the standard set from `nwp_verify.py`, plus `events/` (days 0/1) and
+    `events_d5d7/`.
+  - `scripts/nwp_compare_gem_plots.py` -> `images/verification/model_comparison/gem_vs_gfs_ecmwf_by_lead.png`.
+    It shows RMSE by lead for each model's GBT and bias-corrected raw wind on common rows, and GBT-GEM minus
+    GBT-ECMWF / GBT-GFS / bias-corrected GEM with CIs.
+  - Side-by-side event plots, GBT-GEM vs GBT-ECMWF, days 1 and 5, each model at its native times:
+    `model_comparison/gem_vs_gbt_ecmwf_events/<set>.png`. Window table:
+    `model_comparison/gem_vs_gbt_ecmwf_event_windows.csv`.
+  - Median event-window RMSE on common ECMWF-native times:
+    - Day 1: GBT-ECMWF 3.19 vs GBT-GEM 3.16. GEM is better in 58/130 windows.
+    - Day 5: 4.72 vs 4.33. GEM is better in 70/130 windows.
+  - In the top-5 event windows, GEM-driven GBT matches or beats ECMWF-driven GBT. Its aggregate deficit comes from
+    ordinary hours.
