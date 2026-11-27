@@ -30,6 +30,10 @@ cells = pd.read_csv(f"{C.OPEN_METEO_ROOT}/points/{a.model}/grid_cells.csv")
 PV, WV = "pressure_msl_hpa", "wind_speed_10m_mps"
 pres_st = cells.stid[cells.role.isin(["gradient", "both"])].tolist()
 wind_st = cells.stid[cells.role.isin(["set", "both"])].tolist()
+HAS_P = bool(P[PV].notna().any())          # False for wind-only models (NBM): pressure checks are skipped
+if not HAS_P:
+    pres_st = []
+VARS = [(PV, pres_st), (WV, wind_st)] if HAS_P else [(WV, wind_st)]
 
 # ---- 1. completeness ----
 print("== 1. completeness ==")
@@ -42,14 +46,16 @@ print(f"missing pressure at pressure stations: {P[P.stid.isin(pres_st)][PV].isna
 
 # ---- 2. ranges ----
 print("\n== 2. value ranges ==")
-pp = P[P.stid.isin(pres_st)].groupby("stid")[PV].describe(percentiles=[0.01, 0.99])[["min", "1%", "mean", "99%", "max"]]
-print("pressure (hPa) overall min/max:", round(pp["min"].min(), 1), round(pp["max"].max(), 1))
-print(pp.round(1).sort_values("min").head(5).to_string())
+if HAS_P:
+    pp = P[P.stid.isin(pres_st)].groupby("stid")[PV].describe(percentiles=[0.01, 0.99])[["min", "1%", "mean", "99%", "max"]]
+    print("pressure (hPa) overall min/max:", round(pp["min"].min(), 1), round(pp["max"].max(), 1))
+    print(pp.round(1).sort_values("min").head(5).to_string())
+    pp.round(2).to_csv(f"{OUT}/pressure_ranges.csv")
 ww = P[P.stid.isin(wind_st)].groupby("stid")[WV].describe(percentiles=[0.99])[["min", "mean", "99%", "max"]]
 print(f"wind (m/s): min {ww['min'].min():.2f}, negative values {(P[WV] < 0).sum()}, "
       f"overall max {ww['max'].max():.1f}; stations with max > 30 m/s: {(ww['max'] > 30).sum()}")
 print("highest-max wind stations:\n" + ww.sort_values("max", ascending=False).head(5).round(1).to_string())
-pp.round(2).to_csv(f"{OUT}/pressure_ranges.csv"); ww.round(2).to_csv(f"{OUT}/wind_ranges.csv")
+ww.round(2).to_csv(f"{OUT}/wind_ranges.csv")
 
 # ---- 3. stuck / constant runs (day 0 and day 7) ----
 print("\n== 3. stuck values ==")
@@ -61,14 +67,14 @@ def longest_run(x):
     ids = np.cumsum(change)
     return np.bincount(ids).max()
 rows = []
-for var, sts in ((PV, pres_st), (WV, wind_st)):
+for var, sts in VARS:
     sub = P[P.stid.isin(sts) & P.lead_day.isin([0, 7])].sort_values(["stid", "lead_day", "valid_utc"])
     for (s, k), x in sub.groupby(["stid", "lead_day"]):
         rows.append(dict(var=var, stid=s, lead_day=k, longest_identical_run_h=longest_run(x[var]),
                          n_unique=x[var].nunique(), frac_zero=float((x[var] == 0).mean())))
 stuck = pd.DataFrame(rows)
 stuck.to_csv(f"{OUT}/stuck_runs.csv", index=False)
-for var in (PV, WV):
+for var, _ in VARS:
     s = stuck[stuck["var"] == var]
     print(f"{var}: longest identical run max {s.longest_identical_run_h.max()} h "
           f"(median {s.longest_identical_run_h.median():.0f}); min unique values {s.n_unique.min()}; "
@@ -77,9 +83,9 @@ print(stuck.sort_values("longest_identical_run_h", ascending=False).head(6).to_s
 
 # ---- 4. lead-day consistency ----
 print("\n== 4. lead-day consistency ==")
-w = P.pivot_table(index=["stid", "valid_utc"], columns="lead_day", values=[PV, WV])
+w = P.pivot_table(index=["stid", "valid_utc"], columns="lead_day", values=[v for v, _ in VARS])
 lc = []
-for var, sts in ((PV, pres_st), (WV, wind_st)):
+for var, sts in VARS:
     x = w[var].loc[sts]
     nlead = int(P.lead_day.max()) + 1
     for k in range(nlead):
@@ -109,20 +115,23 @@ print(cells.reindex(cells.dz_m.abs().sort_values(ascending=False).index)
 
 # ---- 6a. day-0 pressure vs METAR SLP ----
 print("\n== 6a. day-0 pressure vs METAR SLP (gradient stations) ==")
-g = pd.read_parquet(f"{DER}/gradients/gradient_timeseries.parquet")
-g = g[(g.time_utc >= "2025-12-31 23:00") & (g.time_utc < "2026-11-01")].copy()
-g["valid_utc"] = g.time_utc.dt.ceil("h")
-obs = pd.concat([g[["station1", "valid_utc", "slp1_hpa"]].set_axis(["stid", "valid_utc", "slp"], axis=1),
-                 g[["station2", "valid_utc", "slp2_hpa"]].set_axis(["stid", "valid_utc", "slp"], axis=1)])
-obs = obs.dropna().groupby(["stid", "valid_utc"]).slp.first().reset_index()
-m = P[(P.lead_day == 0) & P.stid.isin(pres_st)].merge(obs, on=["stid", "valid_utc"])
-m["e"] = m[PV] - m.slp
-ps = m.groupby("stid").agg(n=("e", "size"), bias=("e", "mean"), sd=("e", "std"),
-                           r=("slp", lambda s: s.corr(m.loc[s.index, PV])), max_abs=("e", lambda e: e.abs().max()))
-ps.round(2).to_csv(f"{OUT}/day0_pressure_vs_obs.csv")
-print(ps.round(2).sort_values("sd").to_string())
-print("by month (pooled bias / sd):")
-print(m.groupby(m.valid_utc.dt.month).e.agg(["mean", "std"]).round(2).T.to_string())
+if not HAS_P:
+    print("skipped (no pressure for this model)")
+else:
+    g = pd.read_parquet(f"{DER}/gradients/gradient_timeseries.parquet")
+    g = g[(g.time_utc >= "2025-12-31 23:00") & (g.time_utc < "2026-11-01")].copy()
+    g["valid_utc"] = g.time_utc.dt.ceil("h")
+    obs = pd.concat([g[["station1", "valid_utc", "slp1_hpa"]].set_axis(["stid", "valid_utc", "slp"], axis=1),
+                     g[["station2", "valid_utc", "slp2_hpa"]].set_axis(["stid", "valid_utc", "slp"], axis=1)])
+    obs = obs.dropna().groupby(["stid", "valid_utc"]).slp.first().reset_index()
+    m = P[(P.lead_day == 0) & P.stid.isin(pres_st)].merge(obs, on=["stid", "valid_utc"])
+    m["e"] = m[PV] - m.slp
+    ps = m.groupby("stid").agg(n=("e", "size"), bias=("e", "mean"), sd=("e", "std"),
+                               r=("slp", lambda s: s.corr(m.loc[s.index, PV])), max_abs=("e", lambda e: e.abs().max()))
+    ps.round(2).to_csv(f"{OUT}/day0_pressure_vs_obs.csv")
+    print(ps.round(2).sort_values("sd").to_string())
+    print("by month (pooled bias / sd):")
+    print(m.groupby(m.valid_utc.dt.month).e.agg(["mean", "std"]).round(2).T.to_string())
 
 # ---- 6b. day-0 wind vs matched max sustained wind ----
 print("\n== 6b. day-0 wind vs observed matched max sustained (set stations) ==")

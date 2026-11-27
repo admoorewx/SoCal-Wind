@@ -18,6 +18,8 @@ Feature construction reproduces training exactly (checked on 2025 rows, see --ch
 
 -> derived/verification/<model>/forecasts_sustained.parquet
 -> derived/verification/model_checksums.txt
+Wind-only models (nwp_config variables without pressure_msl, e.g. NBM): GBT/gradient NWP columns are skipped (NaN
+sel_nwp_*); only obs columns, nwp_p75_rep, nwp_p75_all, n_nwp_rep.
 Usage: python nwp_run_gbt.py --model gfs [--check]
 """
 import argparse, glob, hashlib, json, os, re
@@ -43,6 +45,9 @@ ap.add_argument("--check", action="store_true", help="only verify feature constr
 a = ap.parse_args()
 OUT = f"{DER}/verification/{a.model}"
 os.makedirs(OUT, exist_ok=True)
+CFG = C.MODELS[a.model]
+# wind-only models (NBM): no pressure, so no NBM-driven GBT; only the raw-wind set target nwp_p75_rep (+ obs columns)
+WIND_ONLY = "pressure_msl" not in CFG.get("variables", ("pressure_msl",))
 pairs = gp.load_pairs(gp.DEFAULT_GRADIENTS)                     # name -> (station1, station2)
 PAIRS = list(pairs)
 
@@ -135,16 +140,19 @@ G_obs = obs_gradients(START, END)
 P = pd.read_parquet(f"{C.OPEN_METEO_ROOT}/points/{a.model}/points_{a.points_tag}.parquet")
 P["valid_utc"] = P.valid_utc.astype("datetime64[us, UTC]")
 pres_st = sorted({s for p in pairs.values() for s in p})
-PP = P[P.stid.isin(pres_st)][["valid_utc", "stid", "lead_day", "lead_h", "pressure_msl_hpa"]].copy()
-coef = json.load(open(f"{OUT}/pressure_calibration/{a.calib}"))["coefficients"]
-PP["p_corr"] = np.nan
-for s, idx in PP.groupby("stid").groups.items():
-    PP.loc[idx, "p_corr"] = PP.loc[idx, "pressure_msl_hpa"] - C.slp_correction_design(PP.loc[idx, "valid_utc"]) @ np.array(coef[s])
+if WIND_ONLY:
+    lead_h = P.drop_duplicates(["lead_day", "valid_utc"]).set_index(["lead_day", "valid_utc"]).lead_h
+PP = pd.DataFrame() if WIND_ONLY else P[P.stid.isin(pres_st)][["valid_utc", "stid", "lead_day", "lead_h", "pressure_msl_hpa"]].copy()
 G_nwp = {}
-for lab, col in (("nwp_raw", "pressure_msl_hpa"), ("nwp_corr", "p_corr")):
-    w = PP.pivot_table(index=["lead_day", "valid_utc"], columns="stid", values=col)
-    G_nwp[lab] = pd.DataFrame({pn: w[s1] - w[s2] for pn, (s1, s2) in pairs.items()})
-lead_h = PP.drop_duplicates(["lead_day", "valid_utc"]).set_index(["lead_day", "valid_utc"]).lead_h
+if not WIND_ONLY:
+    coef = json.load(open(f"{OUT}/pressure_calibration/{a.calib}"))["coefficients"]
+    PP["p_corr"] = np.nan
+    for s, idx in PP.groupby("stid").groups.items():
+        PP.loc[idx, "p_corr"] = PP.loc[idx, "pressure_msl_hpa"] - C.slp_correction_design(PP.loc[idx, "valid_utc"]) @ np.array(coef[s])
+    for lab, col in (("nwp_raw", "pressure_msl_hpa"), ("nwp_corr", "p_corr")):
+        w = PP.pivot_table(index=["lead_day", "valid_utc"], columns="stid", values=col)
+        G_nwp[lab] = pd.DataFrame({pn: w[s1] - w[s2] for pn, (s1, s2) in pairs.items()})
+    lead_h = PP.drop_duplicates(["lead_day", "valid_utc"]).set_index(["lead_day", "valid_utc"]).lead_h
 
 # NWP wind (mph) per lead: valid x stid
 W = P[P.stid.isin(set(sets[sets.variable == VAR].stid))][["valid_utc", "stid", "lead_day", "wind_speed_10m_mps"]]
@@ -180,10 +188,14 @@ for sg in SETS:
     # reporting mask aligned to target rows (target time_utc -> station columns)
     R = rep[s1_of[pn]].reindex(index=t.time_utc.to_numpy(), columns=stids, fill_value=False).to_numpy()
     for k in leads:
-        Gk = G_nwp["nwp_raw"].loc[k]
-        Gc = G_nwp["nwp_corr"].loc[k]
-        own_raw = Gk[pn].reindex(t.index).to_numpy()
-        own_cor = Gc[pn].reindex(t.index).to_numpy()
+        if WIND_ONLY:
+            Gk = Gc = None
+            own_raw = own_cor = np.full(len(t), np.nan)
+        else:
+            Gk = G_nwp["nwp_raw"].loc[k]
+            Gc = G_nwp["nwp_corr"].loc[k]
+            own_raw = Gk[pn].reindex(t.index).to_numpy()
+            own_cor = Gc[pn].reindex(t.index).to_numpy()
         row = pd.DataFrame({"signed_gradient": sg, "valid_utc": t.index, "lead_day": np.int8(k),
                             "lead_h": lead_h.loc[k].reindex(t.index).to_numpy(),
                             "target_mph": t.target_mph.to_numpy(), "qualifies": t.qualifies.to_numpy(),
@@ -195,8 +207,9 @@ for sg in SETS:
         for kk, b in boosters.items():
             name = "gbt" if kk == "lin" else kk
             row[f"{name}_obs"] = obs_pred[kk]
-            row[f"{name}_nwp_raw"] = predict(b, own_raw, Gk, valid)[0]
-            row[f"{name}_nwp_corr"] = predict(b, own_cor, Gc, valid)[0]
+            if not WIND_ONLY:
+                row[f"{name}_nwp_raw"] = predict(b, own_raw, Gk, valid)[0]
+                row[f"{name}_nwp_corr"] = predict(b, own_cor, Gc, valid)[0]
         Wk = W.loc[k].reindex(index=t.index, columns=stids).to_numpy()
         with np.errstate(all="ignore"):
             import warnings
@@ -217,7 +230,7 @@ q = F[F.qualifies & F.target_mph.notna()]
 rows = []
 for k, x in q.groupby("lead_day"):
     r = {"lead_day": k}
-    for lab in ("obs", "nwp_raw", "nwp_corr"):
+    for lab in ("obs",) if WIND_ONLY else ("obs", "nwp_raw", "nwp_corr"):
         s = x[x[f"sel_{lab}"]]
         r[f"n_{lab}"] = len(s)
         r[f"rmse_gbt_{lab}"] = np.sqrt(((s[f"gbt_{lab}"] - s.target_mph) ** 2).mean())

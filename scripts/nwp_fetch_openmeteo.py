@@ -33,7 +33,8 @@ def log(msg):
     print(f"[{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}Z] {msg}", flush=True)
 
 
-def station_table():
+def station_table(only_vars=None):
+    """only_vars: restrict to these variables (wind-only models); stations left with none are dropped."""
     g = pd.read_parquet(f"{ROOT}/data/v2/derived/gradients/gradient_timeseries.parquet", columns=["station1", "station2"])
     grad = set(g.station1) | set(g.station2)
     sets = set(pd.read_csv(f"{ROOT}/data/v2/derived/models/station_sets.csv").stid)
@@ -44,7 +45,11 @@ def station_table():
         var = {"gradient": ["pressure_msl"], "set": ["wind_speed_10m"], "both": ["pressure_msl", "wind_speed_10m"]}[role]
         rows.append(dict(stid=s, role=role, variables=",".join(var), lat=meta.lat[s], lon=meta.lon[s],
                          elevation_m=meta.elevation_m[s]))
-    return pd.DataFrame(rows)
+    t = pd.DataFrame(rows)
+    if only_vars:
+        t["variables"] = t.variables.map(lambda v: ",".join(x for x in v.split(",") if x in only_vars))
+        t = t[t.variables != ""].reset_index(drop=True)
+    return t
 
 
 def request(url, params):
@@ -145,7 +150,7 @@ def build(args, cfg, stations, raw_dir, pts_dir, tag):
         n = len(valid)
         for k in days:
             out = dict(valid_utc=valid, stid=np.full(n, r.stid), lead_day=np.full(n, k, dtype="int8"),
-                       lead_h=np.asarray(C.lead_hours(valid.hour.values, k, C.cycle_hours_for(cfg, k)), dtype="int16"))
+                       lead_h=np.asarray(C.lead_hours_for(cfg, valid.hour.values, k), dtype="int16"))
             for v, colname in C.VARIABLES.items():
                 c = C.column_name(v, k)
                 out[colname] = (np.array([np.nan if x is None else x for x in h[c]], dtype="float32")
@@ -182,7 +187,7 @@ def main():
     for d in (raw_dir, pts_dir, f"{C.OPEN_METEO_ROOT}/logs"):
         os.makedirs(d, exist_ok=True)
     man_path = f"{C.OPEN_METEO_ROOT}/manifest_{args.model}.csv"
-    stations = station_table()
+    stations = station_table(cfg.get("variables"))
     if not args.build_only:
         fetch(args, cfg, stations, raw_dir, man_path)
     build(args, cfg, stations, raw_dir, pts_dir, tag)

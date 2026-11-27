@@ -724,3 +724,126 @@ Scratch check, about 75 weighted calls. KLAX; previous_day0-7 compared against s
     - Day 5: 4.72 vs 4.33. GEM is better in 70/130 windows.
   - In the top-5 event windows, GEM-driven GBT matches or beats ECMWF-driven GBT. Its aggregate deficit comes from
     ordinary hours.
+
+## Q3 NBM plan (user decisions 2026-11-25)
+- NBM (`ncep_nbm_conus`) has no pressure, so there is no NBM-driven GBT. NBM serves as a raw-wind benchmark.
+- **Sustained wind only** for now; no gusts.
+- **Compare NBM against all guidance:** raw, bias-corrected and GBT for GFS, ECMWF and GEM, plus HRRR at days 0-1.
+- **Bias-correct NBM too** (same per-set, per-lead oracle). NBM is calibrated to URMA 10 m wind, not to our set-P75
+  hourly-max target, so a definitional offset is expected to remain.
+- Steps:
+  1. Lead check: runs feeding each day, native step, horizon.
+  2. Wind-only fetch at set stations.
+  3. QC.
+  4. `nwp_raw_wind.py` builds set-level `nwp_p75_rep` (same logic as `nwp_run_gbt.py`).
+  5. Common-row comparison plus figures.
+
+## Q3 NBM: lead check, code, fetch status (2026-11-25), resume here
+**Lead check** (about 200 weighted calls; KLAX, valid 2026-06-08, `ncep_nbm_conus`, wind only):
+- **Single-runs archive:** keeps only 00/03/../21Z cycles (01Z, 02Z etc. return "run not available"). Each run
+  reaches about 262 h and starts at +1 h (no f000). Archive runs exist from at least 2026-06-01, unlike GEM.
+- **Lead rule:** days 1-7 come from the hourly run exactly 24N h before valid (lead = 24N), and day 0 is lead 1 h.
+  - The values match exactly at the 8 hours per day where that run is archived.
+  - At the other hours, the 3/6/12-hourly rules fail (up to 1.2 m/s off). Those hours are also not Hermite
+    interpolations of the stitched previous-runs series (up to 0.57 m/s off), so they come from the unarchived
+    hourly runs.
+- **Native step within a run:** hourly to 36 h, then 3-hourly to about 192 h. Off-3-hourly hours equal Open-Meteo's
+  Catmull-Rom Hermite fill within 0.005 m/s. Every NBM lead (1, 24, ..., 168 h) is native, so all hours are scored.
+- **Fairness caveat:** at the same lead day NBM is fresher than GFS/ECMWF (24N + 0-5 h) and GEM (24N + 0-11 h). At
+  00/12Z valid times every model's lead is exactly 24N, so the comparison reports an equal-lead subset.
+- **Method:** a scratch script, not kept. Fetch `previous_day0-7` for one day and the single runs (`run=...`,
+  `forecast_days=11`, every 3 h back 10 days). For each candidate rule (run spacing s = 1/3/6/12, minimum lead
+  0/1 h), compute max |previous - single run|. For the native step, compare off-grid hours with Catmull-Rom
+  Hermite interpolation of the 3-/6-hourly values, binned by lead.
+
+**Code** (uncommitted as of 2026-11-25; tested on partial data):
+- `nwp_config.py`:
+  - `nbm` entry: `variables=("wind_speed_10m",)`, `cycle_hours=1`, `lead_h_add={0: 1}`,
+    `native_steps=((36,1),(192,3),(None,6))`.
+  - New `lead_hours_for(cfg, hour, day)` helper (adds `lead_h_add`).
+- `nwp_fetch_openmeteo.py`: `station_table(only_vars)` keeps 425 set stations for wind-only models; `build()` uses
+  `lead_hours_for`.
+- `nwp_qc_points.py`: `HAS_P`; the pressure checks are skipped for wind-only models.
+- `nwp_run_gbt.py`: `WIND_ONLY` path. It writes the obs columns, `nwp_p75_rep`, `nwp_p75_all` and `n_nwp_rep`, with
+  no NWP-driven GBT or gradient columns. Regression check: the GEM output is identical after the edit.
+- `nwp_compare_nbm.py` (new):
+  - Common rows: native to NBM, GFS, ECMWF and GEM, selected by all three GBTs' corrected signs.
+  - Forecasts: raw/bc NBM vs GBT/bc/raw for each of GFS, ECMWF and GEM.
+  - Groups: all / offshore / >=30 mph obs / 00+12Z (equal lead).
+  - HRRR table: days 0-1 on rows that also have HRRR.
+  - Day-block bootstrap differences.
+  - Outputs: `model_comparison/nbm_vs_guidance_{scores,diffs,hrrr_scores}.csv`.
+- `nwp_compare_nbm_plots.py` (new):
+  - `images/verification/model_comparison/nbm_vs_guidance_by_lead.png` (3x2).
+  - `nbm_vs_gbt_ecmwf_events/<set>.png`: GBT-ECMWF vs raw NBM, days 1 and 5.
+  - `model_comparison/nbm_vs_gbt_ecmwf_event_windows.csv`.
+
+**Fetch status:**
+- Started 2026-11-25 02:35Z; cost 17.37 per station.
+- Hit the free-tier daily cap at 03:38Z after 275/425 stations (4,777 calls; the GEM fetch had used about 5.2k of
+  the same UTC day).
+- The process sleeps until about 00:01Z 2026-11-26, then resumes. It will probably not survive the session ending.
+- Log: `/mnt/d/NWP/open_meteo/logs/fetch_nbm_2026.log`. Manifest: `/mnt/d/NWP/open_meteo/manifest_nbm.csv`.
+
+**STALE partial outputs, overwrite them:** the NBM points table, `verification/nbm/qc/`,
+`verification/nbm/forecasts_sustained.parquet`, the `nbm_vs_*` CSVs and figures. All were built from 19-32 stations
+for testing. Set P75 over partial stations is NOT comparable, so do not quote any of those numbers.
+
+**Resume steps** (from `scripts/`, with `~/.venv/analysis_env/bin/python`):
+1. Check `tail /mnt/d/NWP/open_meteo/logs/fetch_nbm_2026.log` and `ps aux | grep nwp_fetch`. If the fetch isn't
+   finished and isn't running, rerun `python nwp_fetch_openmeteo.py --model nbm --start 2026-01-01 --end 2026-10-31`.
+   It skips stations marked ok in the manifest (about 150 left, 2.6k calls, 35 min) and then builds the points table.
+   Confirm 425/425 ok in the manifest.
+2. `python nwp_qc_points.py --model nbm`. Compare day-0 wind r and obs ratio with the other models: GFS 0.62 / 0.94,
+   ECMWF 0.65 / 0.75, GEM 0.62 / 0.65, HRRR 0.73 / 1.11. The first 19 stations gave NBM 0.76 / 0.79. Also check the
+   high day-0 frac_zero (up to 0.16) and the 41 h stuck runs at day 0.
+3. `python nwp_run_gbt.py --model nbm` (wind-only path; about 2 min).
+4. `python nwp_compare_nbm.py`, then `python nwp_compare_nbm_plots.py`. Look at the figures.
+5. Log the results here, update the memory note, and commit. Uncommitted at this point: the NBM code above, this doc
+   section, and the plan section above. The AWS PRMSL scripts stay uncommitted by choice.
+6. Optional, if wanted for consistency: `nwp_verify.py` does not support wind-only models (it needs GBT-NWP
+   columns), so NBM has no per-model `images/verification/nbm/native/` suite. Ask the user before adapting it.
+
+## Q3 NBM results (2026-11-27)
+**Fetch:** resumed 2026-11-27 06:39Z and finished in 40 min (2,606 weighted calls). The manifest shows 425/425 ok
+and 0 missing. Points table: 24.8M rows. All the earlier STALE partial outputs are overwritten.
+
+**QC (`nwp_qc_points.py --model nbm`):**
+- Day-0 wind against observations: median r 0.69, median NWP/obs ratio 1.00 (351 matched stations).
+- That is the best r after HRRR (0.73 / 1.11) and the best ratio of any model.
+- Stuck values are station-specific. MSAC1 has a 218 h identical run and 46% exact zeros, and KEDU has 36% zeros.
+  These are probably calm sites where NBM's blending of observations shows through. They are not a fetch fault.
+
+**Comparison (`nwp_compare_nbm.py`):** common rows, RMSE in mph, day-block bootstrap 95% CI.
+
+| lead day | raw NBM | bc NBM | GBT-ECMWF | bc ECMWF | GBT-GEM | GBT-GFS |
+|---|---|---|---|---|---|---|
+| 0 | 3.67 | 2.82 | 2.80 | 3.10 | 2.84 | 3.04 |
+| 1 | 3.78 | 2.95 | 2.88 | 3.22 | 3.06 | 3.19 |
+| 3 | 4.29 | 3.48 | 3.20 | 3.50 | 3.51 | 3.64 |
+| 5 | 4.99 | 4.14 | 3.82 | 4.03 | 4.26 | 4.33 |
+| 7 | 5.37 | 4.51 | 4.74 | 4.64 | 4.95 | 5.11 |
+
+- **Raw NBM** has a bias of about -2 mph. GBT-ECMWF beats it at every lead by 0.6-1.2 mph (all CIs exclude 0).
+  The offshore margin is 0.7-1.5 mph.
+- **Bias-corrected NBM** is the strongest benchmark.
+  - Against GBT-ECMWF: a tie at days 0-1, then GBT-ECMWF is better at days 2-5 (-0.14 to -0.33, significant).
+    Days 6-7 favour bc NBM (day 7 +0.23, significant).
+  - GBT-GEM and GBT-GFS are tied with it or worse in the all-rows group.
+  - bc NBM beats bc ECMWF through day 2.
+- **Offshore:** GBT-ECMWF beats bc NBM at days 0-5 (-0.33 to -0.66, all significant). Days 6-7 are ties.
+- **>= 30 mph observed** (n of about 65-146): raw NBM 11.6-17.4 and bc NBM 7.8-12.3. GBT-ECMWF and GBT-GEM give
+  7.0-10.7, which is better than bc NBM from day 2 on.
+- **Equal-lead subset (00/12Z):** gives the same picture. GBT-ECMWF ties bc NBM at days 0-2 and beats it at days 3-5.
+- **HRRR rows (days 0-1):**
+  - Day 0: bc HRRR is best (2.41), then GBT-ECMWF (2.81) and raw HRRR (2.82), then bc NBM (2.83).
+  - Day 1: bc HRRR 2.93, GBT-ECMWF 2.90, bc NBM 2.97, raw HRRR 3.21.
+
+**Figures:**
+- `images/verification/model_comparison/nbm_vs_guidance_by_lead.png`.
+- Event plots in `nbm_vs_gbt_ecmwf_events/` (26 sets). Median event-window RMSE, GBT-ECMWF vs raw NBM: 3.19 vs 3.62
+  at day 1 and 4.72 vs 6.43 at day 5. Raw NBM runs persistently low through offshore peaks (see LAX-TPH-).
+
+**Takeaway:** the GBT driven by ECMWF SLP matches the best operational blended guidance (NBM) at short range. It
+beats NBM in the mid-range and in offshore and strong-wind cases, even after NBM receives an oracle bias correction.
+NBM keeps a small edge at days 6-7.

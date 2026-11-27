@@ -66,6 +66,23 @@ MODELS = {
         grid_note="GEM GDPS 15 km (cmc_gem_gdps_15km); returned lat/lon is the model cell; surface_pressure is "
                   "derived by Open-Meteo from pressure_msl and the requested elevation (elevation=0 -> equals msl)",
     ),
+    # Added 2026-11-25. Wind only (Open-Meteo NBM has no pressure_msl), so no NBM-driven GBT. Lead definition checked
+    # against single runs (KLAX, valid 2026-06-08; the single-runs archive keeps only 00/03/../21Z cycles, each to
+    # ~262 h, first output at +1 h): days 1-7 = the hourly run exactly 24N h before valid (exact match where that run
+    # is archived; off-3h hours are not interpolations of the stitched series, so they come from the unarchived
+    # hourly runs); day 0 = lead 1 h. Native output hourly to 36 h, 3-hourly to ~192 h, so every lead (1, 24N <= 168)
+    # is native. NBM is fresher than GFS/ECMWF (24N + 0-5 h) and GEM (24N + 0-11 h) at the same lead day.
+    "nbm": dict(
+        open_meteo_model="ncep_nbm_conus",
+        api="previous_runs",
+        variables=("wind_speed_10m",),
+        max_lead_day=7,
+        cycle_hours=1,                  # hourly runs; lead_h = 24*N
+        lead_h_add={0: 1},              # no f000: day 0 is the +1 h forecast of the previous hour's run
+        native_steps=((36, 1), (192, 3), (None, 6)),
+        archive_start="2024-10-08T00:00",  # Historical Forecast table (plan doc); previous-runs start not checked
+        grid_note="NBM CONUS 2.5 km; returned lat/lon is the model cell; wind only",
+    ),
 }
 
 # Open-Meteo variable -> (column name in points table, request unit parameter)
@@ -117,3 +134,8 @@ def is_native(cfg, lead_h):
 def lead_hours(valid_hour, lead_day, cycle_hours=6):
     """Nominal forecast lead (h) for previous_dayN, from the pilot's run-matching check."""
     return 24 * lead_day + valid_hour % cycle_hours
+
+
+def lead_hours_for(cfg, valid_hour, lead_day):
+    """lead_hours with a model's per-day run spacing and any fixed offset (NBM day 0 = +1 h)."""
+    return lead_hours(valid_hour, lead_day, cycle_hours_for(cfg, lead_day)) + cfg.get("lead_h_add", {}).get(lead_day, 0)
